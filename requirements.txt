@@ -1,0 +1,6 @@
+# The renderer needs three things. moviepy pulls in imageio-ffmpeg, which
+# ships an ffmpeg binary of its own — so nothing here depends on ffmpeg
+# being installed or on PATH.
+moviepy>=2.0
+numpy>=1.24
+pillow>=10.0
