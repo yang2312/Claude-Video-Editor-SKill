@@ -54,6 +54,9 @@ Per clip:
     shutter_samples how many sub-frames the exposure is built from (default 3)
     stutter         hold the shot at this many frames a second — 8 or 12 gives
                     the choppy, posterised look. 0 leaves it smooth.
+    spill           under an out-of-bounds transition, which block of picture
+                    breaks the border: [top, bottom, left, right] as
+                    fractions. Put it over something real.
     fit             letterbox the whole frame on a blurred bed instead of
                     cropping — for shots whose meaning spans the full width
     grade           a preset name, or an object of overrides
@@ -108,9 +111,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from reel_grade import (Grade, Look, PRESETS, release_all,  # noqa: E402
                         resolve_look)
-from reel_timeline import (MARK_SECONDS, MOTIONS, RESAMPLE_MODES,  # noqa: E402
-                           STRADDLE_SECONDS, TRANSITIONS, CameraMove,
-                           ClipSource, Shot, StillSource, Timeline,
+from reel_timeline import (DEFAULT_SPILL, MARK_SECONDS, MOTIONS,  # noqa: E402
+                           RESAMPLE_MODES, STRADDLE_SECONDS, TRANSITIONS,
+                           CameraMove, ClipSource, Shot, StillSource, Timeline,
                            auto_motion, build_framing, plan)
 
 # x264 effort levels, cheapest first. Named here so a typo is caught at parse
@@ -208,7 +211,7 @@ def reject_unknown(entry: dict, allowed, where: str) -> None:
 CLIP_KEYS = frozenset({
     "start", "end", "duration", "image", "anchor", "speed", "motion", "zoom",
     "pan", "ease", "fit", "grade", "transition", "label", "shutter",
-    "shutter_samples", "stutter",
+    "shutter_samples", "stutter", "spill",
 })
 
 REEL_KEYS = frozenset({
@@ -230,6 +233,7 @@ class ClipSpec:
     shutter: float = 0.0
     shutter_samples: int = 3
     stutter: float = 0.0
+    spill: tuple = DEFAULT_SPILL
     fit: bool = False
     look: Look = field(default_factory=Look)
     grade_name: str = "none"
@@ -300,14 +304,6 @@ class ClipSpec:
                                   curve=entry.get("ease", "smooth"), where=where)
 
         fit = bool(entry.get("fit", False))
-        if fit and move.pans and move.widest <= 1.0:
-            # Fit sizes the picture to the output width, so at zoom 1.0 there
-            # is nowhere for a pan to travel. Refusing beats rendering a
-            # frozen shot and reporting success, which is what used to happen.
-            raise ValueError(
-                f"{where} asks for {move.motion} in fit mode at zoom 1.0, where "
-                f"the picture exactly fills the frame width and a pan has "
-                f"nowhere to go. Add a zoom above 1.0 to make room, or drop fit.")
 
         transition = entry.get("transition", "crossfade")
         if transition not in TRANSITIONS:
@@ -333,12 +329,50 @@ class ClipSpec:
         if stutter < 0:
             raise ValueError(f"{where} stutter cannot be negative, got {stutter}")
 
+        spill = cls._resolve_spill(entry.get("spill"), transition, where)
+
         look, grade_name = resolve_look(entry.get("grade"))
 
         return cls(start=start, end=end, image=image, speed=speed, move=move,
                    shutter=shutter, shutter_samples=shutter_samples,
-                   stutter=stutter, fit=fit, look=look, grade_name=grade_name,
-                   transition=transition, label=entry.get("label", ""))
+                   stutter=stutter, spill=spill, fit=fit, look=look,
+                   grade_name=grade_name, transition=transition,
+                   label=entry.get("label", ""))
+
+    @staticmethod
+    def _resolve_spill(value, transition: str, where: str) -> tuple:
+        """
+        Which block of picture breaks out of an out-of-bounds frame.
+
+        Four fractions, top bottom left right. It is the one number in the
+        effect that decides whether it reads: a block with a roofline or a
+        tree crossing it reads as depth, and the same block over empty ground
+        reads as a rectangle. Refusing it on any other transition keeps a
+        spec from claiming an effect it did not ask for.
+        """
+        if value is None:
+            return DEFAULT_SPILL
+        if transition != "out-of-bounds":
+            raise ValueError(
+                f"{where} sets `spill`, which only means anything under an "
+                f"out-of-bounds transition; this clip joins with "
+                f"{transition!r}.")
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            raise ValueError(
+                f"{where} spill takes four fractions — top, bottom, left, "
+                f"right — got {value!r}")
+
+        top, bottom, left, right = (float(v) for v in value)
+        for name, v in zip(("top", "bottom", "left", "right"),
+                           (top, bottom, left, right)):
+            if not 0.0 <= v <= 1.0:
+                raise ValueError(
+                    f"{where} spill {name} must be between 0 and 1, got {v}")
+        if top >= bottom or left >= right:
+            raise ValueError(
+                f"{where} spill has no area: top {top} to bottom {bottom}, "
+                f"left {left} to right {right}")
+        return top, bottom, left, right
 
 
 @dataclass
@@ -536,11 +570,24 @@ def build_shots(spec: ReelSpec) -> list:
 
         framing = build_framing(source, clip.fit, clip.move, out_w, out_h,
                                 clip.look.softness, spec.resample)
+
+        # A pan with no room to travel renders a frozen shot and reports
+        # success. This used to be checked for fit only, which missed the
+        # case that bites hardest: delivering 16:9 from a 16:9 source, where
+        # cropping has no free slack either and every pan in the spec is
+        # silently dead.
+        if clip.move.pans and framing.static:
+            source.release()
+            raise ValueError(
+                f"clips[{len(shots)}] asks for {clip.move.motion}, but at "
+                f"{out_w}x{out_h} this shot's crop already fills the frame and "
+                f"the pan has nowhere to go. Add a zoom above 1.0 to make "
+                f"room, or use a delivery aspect narrower than the source.")
         shots.append(Shot(source, framing, Grade.compile(clip.look, out_w, out_h),
                           duration, clip.label, clip.grade_name, fps=spec.fps,
                           shutter=clip.shutter,
                           shutter_samples=clip.shutter_samples,
-                          stutter=clip.stutter))
+                          stutter=clip.stutter, spill=clip.spill))
     return shots
 
 
@@ -742,6 +789,7 @@ EFFECT_NOTES = {
     "pan": "fraction of the available slack a pan crosses, 0-1",
     "anchor": "where the crop sits when nothing is moving",
     "ease": "how a move spends its time: smooth, or impact for a snap",
+    "spill": "which block breaks an out-of-bounds border: [t, b, l, r]",
     "fit": "letterbox instead of cropping",
 
     "saturation": "1.0 untouched, 0.0 greyscale, above 1 richer",
@@ -785,7 +833,7 @@ def describe_effects() -> str:
         rows("Time          (clip keys)",
              ["speed", "shutter", "shutter_samples", "stutter"]),
         rows("Framing       (clip keys)",
-             ["zoom", "pan", "anchor", "ease", "fit"]),
+             ["zoom", "pan", "anchor", "ease", "fit", "spill"]),
         rows("Grade knobs   (clip key: grade)", knobs,
              "  free except glow and rgb_split, which are spatial"),
         "Grade presets\n-------------\n  " + ", ".join(sorted(PRESETS))

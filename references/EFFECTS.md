@@ -26,6 +26,7 @@ key.
 | `pan` | clip key | `0.0`–`1.0` | how much of the slack a pan crosses |
 | `anchor` | clip key | `[0.5, 0.4]` | where the crop sits when it is not moving |
 | `ease` | clip key | `smooth`/`impact` | how a move spends its time |
+| `spill` | clip key | `[t, b, l, r]` | which block breaks an out-of-bounds border |
 | `crossfade` | `transition` | — | dissolve; reads as time passing |
 | `cut` | `transition` | — | hard join; the only way to feel fast |
 | `flash` | `transition` | — | white bloom over the join |
@@ -243,6 +244,19 @@ rectangle. **Choose the shot, not the knob.**
 
 It lasts 1.3 seconds: the frame draws in, holds long enough to be understood
 as a frame, and releases. Anything shorter is a flicker rather than an idea.
+The border belongs to the shot arriving, so unlike a shake it never appears
+on the shot it is leaving.
+
+`spill` is the block, as four fractions — top, bottom, left, right — and it is
+the whole difference between the effect reading and not:
+
+```json
+{"transition": "out-of-bounds", "spill": [0.50, 1.0, 0.36, 0.92]}
+```
+
+The default `[0.55, 1.0, 0.27, 0.75]` is the bottom of centre, where a
+foreground usually is. Move it over whatever is actually nearest the camera in
+*this* shot.
 
 ---
 

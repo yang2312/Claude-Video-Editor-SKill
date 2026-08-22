@@ -97,7 +97,28 @@ MARK_SECONDS = {"invert": 2 / 30.0, "invert-r": 2 / 30.0, "invert-g": 2 / 30.0,
 # from the crossfade, so it stays special-cased.
 STRADDLE_SECONDS = {"film-roll": 0.44}
 
+# How far ahead of the junction a mark starts.
+#
+# A shake that begins on the frame *after* the cut says the blow landed on
+# the cut. That is not what a blow looks like: the camera is already moving
+# when the picture changes, because whatever hit it hit the shot it was
+# holding. Starting the jolt on the outgoing shot is the difference between
+# a transition with a shake on it and one shot being knocked into the next.
+#
+# Not everything wants one. An out-of-bounds border belongs to the shot
+# arriving, so drawing it over the shot leaving would be a lie about which
+# picture is framed.
+LEAD_SECONDS = {"shake": 4 / 30.0, "shutter-shake": 5 / 30.0,
+                "invert": 1 / 30.0, "invert-r": 1 / 30.0,
+                "invert-g": 1 / 30.0, "invert-b": 1 / 30.0}
+
 _CHANNEL = {"invert-r": 0, "invert-g": 1, "invert-b": 2}
+
+# Which block of picture breaks out of an out-of-bounds frame, as
+# (top, bottom, left, right) fractions. The default is bottom of centre,
+# which is where the near foreground usually is; a clip that puts its
+# foreground somewhere else says so with its own `spill`.
+DEFAULT_SPILL = (0.55, 1.0, 0.27, 0.75)
 
 # Rotated so adjacent shots never repeat a move — the thing that makes a
 # Ken Burns reel read as mechanical rather than filmed.
@@ -573,12 +594,12 @@ class Shot:
 
     __slots__ = ("source", "framing", "grade", "duration", "label",
                  "grade_name", "freezable", "frames_built", "fps", "shutter",
-                 "shutter_samples", "stutter", "_frozen")
+                 "shutter_samples", "stutter", "spill", "_frozen")
 
     def __init__(self, source, framing, grade: Optional[Grade],
                  duration: float, label: str = "", grade_name: str = "none",
                  fps: int = 30, shutter: float = 0.0, shutter_samples: int = 3,
-                 stutter: float = 0.0):
+                 stutter: float = 0.0, spill: tuple = DEFAULT_SPILL):
         self.source = source
         self.framing = framing
         self.grade = grade
@@ -589,6 +610,7 @@ class Shot:
         self.shutter = shutter
         self.shutter_samples = max(2, shutter_samples)
         self.stutter = stutter
+        self.spill = spill
 
         # A still photograph held without a camera move produces the same
         # pixels for its whole length. Resizing and blurring it eighty-four
@@ -764,12 +786,12 @@ class Timeline:
         # Clip 0 always cuts in, so punctuation asked for there has nothing to
         # punctuate. `plan` drops it; this drops it for the same reason, and
         # the spec layer is what refuses it up front.
-        self.marks = [(p.start, kind)
+        self.marks = [(p.start, kind, p.index)
                       for p, kind in zip(self.placements, transitions)
                       if p.index > 0 and (kind in MARK_SECONDS
                                           or kind in STRADDLE_SECONDS
                                           or kind == "flash")]
-        self.flashes = [t for t, kind in self.marks if kind == "flash"]
+        self.flashes = [t for t, kind, _ in self.marks if kind == "flash"]
 
         self.duration = self.placements[-1].end if self.placements else 0.0
         self._crossfade = crossfade
@@ -836,7 +858,7 @@ class Timeline:
         Every one of these touches a handful of frames out of hundreds, so
         each is guarded by its own window rather than wrapping the timeline.
         """
-        for moment, kind in self.marks:
+        for moment, kind, arriving in self.marks:
             since = t - moment
             if kind == "flash":
                 distance = abs(since)
@@ -848,14 +870,18 @@ class Timeline:
                 if -half <= since < half:
                     out = _film_roll(out, (since + half) / (2.0 * half),
                                      step=1.0 / max(1.0, self.fps * 2.0 * half))
-            elif 0.0 <= since < MARK_SECONDS.get(kind, 0.0):
-                progress = since / MARK_SECONDS[kind]
+            elif -LEAD_SECONDS.get(kind, 0.0) <= since < MARK_SECONDS.get(kind, 0.0):
+                # Negative progress is the anticipation, before the cut;
+                # positive is the decay after it. The peak is the junction.
+                progress = (since / MARK_SECONDS[kind] if since >= 0.0
+                            else since / LEAD_SECONDS[kind])
                 if kind == "shake":
                     out = _shake(out, progress, index)
                 elif kind == "shutter-shake":
                     out = _shake(out, progress, index, strength=0.034, smear=4)
                 elif kind == "out-of-bounds":
-                    out = _out_of_bounds(out, progress)
+                    out = _out_of_bounds(out, max(0.0, progress),
+                                         spill=self.shots[arriving].spill)
                 else:
                     out = _invert(out, _CHANNEL.get(kind))
         return out
@@ -914,8 +940,18 @@ def _shake(frame: np.ndarray, progress: float, index: int,
     sequence of stills rather than one violent movement. With it, each frame
     is the average of the jolt in progress, which is what a real camera
     records — and what separates a knock from a hit.
+
+    `progress` runs -1 to 1. Negative is the wind-up before the junction, on
+    the shot that is still on screen; zero is the blow; positive is the
+    decay. A shake that only exists after the cut says the blow landed on the
+    cut, which is not what being hit looks like.
     """
-    decay = (1.0 - min(1.0, max(0.0, progress))) ** 1.6
+    if progress < 0.0:
+        # The wind-up. Steeper than the decay, because a blow arrives faster
+        # than it dies away.
+        decay = max(0.0, 1.0 + progress) ** 1.2
+    else:
+        decay = (1.0 - min(1.0, progress)) ** 1.6
     if decay <= 0.001:
         return frame
 
@@ -1025,7 +1061,7 @@ def _film_roll(frame: np.ndarray, progress: float, pulled: int = 1,
 
 def _out_of_bounds(frame: np.ndarray, progress: float,
                    inset: float = 0.085, border: float = 0.009,
-                   spill: tuple = (0.55, 1.0, 0.27, 0.75)) -> np.ndarray:
+                   spill: tuple = DEFAULT_SPILL) -> np.ndarray:
     """
     The picture drops into a bordered frame and one block breaks out of it.
 

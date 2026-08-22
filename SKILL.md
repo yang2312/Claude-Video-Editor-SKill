@@ -123,6 +123,7 @@ comes from the source); `size` yields exactly what it says.
 | `fit` | false | letterbox instead of cropping |
 | `grade` | — | a preset name, or an object of overrides |
 | `ease` | `"smooth"` | `smooth`, or `impact` for a snap |
+| `spill` | — | which block breaks an `out-of-bounds` border |
 | `transition` | `"crossfade"` | see below |
 | `label` | `""` | free text, echoed in the report |
 
@@ -195,6 +196,11 @@ can still put two of a kind together, and the report warns when it does.
 
 A reel that dissolves throughout has one tempo. Shortening clips *and*
 switching to hard cuts is what makes a back half accelerate.
+
+A shake and an inversion **wind up before the junction**, on the shot that is
+still on screen: a blow that starts on the frame after the cut says it landed
+on the cut, and that is not what being hit looks like. An `out-of-bounds`
+border does not — the frame belongs to the picture arriving.
 
 White reads as light; **inversion reads as a fault in the picture**, which is
 why it lands harder between very short cuts. Alternating the channel across a

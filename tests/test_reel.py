@@ -647,17 +647,36 @@ def regression_fit_framing_honours_a_pan():
 
 
 @test
-def regression_fit_pan_without_room_is_refused_not_frozen():
+def regression_a_pan_without_room_is_refused_not_frozen():
     """
-    At zoom 1.0 a fit pan has nowhere to travel. Rendering it as a still and
-    reporting success is the exact failure this codebase says it cares about.
+    A pan with nowhere to travel renders a still and reports success, which
+    is the exact failure this codebase says it cares about.
+
+    This was once checked for `fit` alone, in the spec parser, where the
+    output aspect is not known. That missed the case that bites hardest:
+    delivering 16:9 from a 16:9 source, where cropping has no free slack
+    either and every pan in the spec is silently dead. The check now lives
+    where the framing is built, so it is the framing's own answer about
+    slack that decides — one rule, both framings.
     """
-    raises(lambda: br.ClipSpec.parse({"start": 0, "end": 1, "fit": True,
-                                      "motion": "pan-right"}, 2, 3.0, 100.0),
+    # 16:9 out of a 16:9 source: the crop already fills the frame.
+    raises(lambda: br.build_shots(spec_for(
+               [{"start": 0, "end": 1, "motion": "pan-right"}], size="320x180")),
+           "nowhere to go", "crop pan at a matching aspect")
+
+    # Fit sizes the picture to the output width, so it never has free slack.
+    raises(lambda: br.build_shots(spec_for(
+               [{"start": 0, "end": 1, "fit": True, "motion": "pan-right"}])),
            "nowhere to go", "fit pan at zoom 1.0")
-    # With room, it is accepted.
-    br.ClipSpec.parse({"start": 0, "end": 1, "fit": True,
-                       "motion": "pan-right", "zoom": 1.2}, 2, 3.0, 100.0)
+
+    # A zoom makes room for either of them.
+    br.build_shots(spec_for([{"start": 0, "end": 1, "motion": "pan-right",
+                              "zoom": 1.2}], size="320x180"))
+    br.build_shots(spec_for([{"start": 0, "end": 1, "fit": True,
+                              "motion": "pan-right", "zoom": 1.2}]))
+
+    # And a delivery aspect narrower than the source gives it for free.
+    br.build_shots(spec_for([{"start": 0, "end": 1, "motion": "pan-right"}]))
 
 
 @test
@@ -1322,7 +1341,7 @@ def a_negative_stutter_is_refused():
 @test
 def an_invert_transition_flips_the_picture_for_two_frames():
     line = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "invert"], 0.0, 30)
-    eq([round(t, 3) for t, kind in line.marks], [1.0], "mark at the junction")
+    eq([round(t, 3) for t, kind, _ in line.marks], [1.0], "mark at the junction")
 
     before = float(line.frame(0.9).mean())
     during = float(line.frame(1.02).mean())
@@ -1425,7 +1444,7 @@ def _every_effect_name():
     names = set(rt.MOTIONS) | set(rt.TRANSITIONS)
     names |= {f.name for f in dataclasses.fields(rg.Look)}
     names |= {"speed", "shutter", "shutter_samples", "stutter",
-              "zoom", "pan", "anchor", "ease", "fit"}
+              "zoom", "pan", "anchor", "ease", "fit", "spill"}
     return names
 
 
@@ -1616,7 +1635,7 @@ def regression_the_new_punctuation_is_refused_on_the_first_clip():
 @test
 def a_film_roll_straddles_its_junction_instead_of_following_it():
     line = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "film-roll"], 0.0, 30)
-    eq([kind for _, kind in line.marks], ["film-roll"], "the mark is registered")
+    eq([kind for _, kind, _ in line.marks], ["film-roll"], "the mark is registered")
 
     before = float(line.frame(0.85).mean())
     after = float(line.frame(1.15).mean())
@@ -1625,6 +1644,69 @@ def a_film_roll_straddles_its_junction_instead_of_following_it():
         raise AssertionError(
             f"the roll did not reach across the junction: {away:.1f} away, "
             f"{before:.1f} before, {after:.1f} after")
+
+
+
+@test
+def a_shake_winds_up_on_the_shot_it_is_leaving():
+    """
+    A blow that starts on the frame after the cut says it landed on the cut.
+
+    What being hit looks like is the camera already moving when the picture
+    changes, because whatever hit it hit the shot it was holding.
+    """
+    line = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "shutter-shake"], 0.0, 30)
+    lead = rt.LEAD_SECONDS["shutter-shake"]
+
+    settled = float(line.frame(0.5).mean())
+    winding = float(line.frame(1.0 - lead * 0.4).mean())
+    if abs(winding - settled) < 1.0:
+        raise AssertionError(
+            f"nothing happened before the cut: {settled:.2f} settled, "
+            f"{winding:.2f} a fifth of a second earlier")
+
+    untouched = float(line.frame(1.0 - lead * 2.0).mean())
+    close(untouched, settled, 1e-6, "further back than the lead is untouched")
+
+
+@test
+def an_out_of_bounds_border_never_lands_on_the_shot_it_is_leaving():
+    """The frame belongs to the picture arriving. Drawing it early is a lie."""
+    line = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "out-of-bounds"], 0.0, 30)
+    close(float(line.frame(0.97).mean()), float(line.frame(0.5).mean()), 1e-6,
+          "the outgoing shot is untouched")
+
+
+
+@test
+def a_spill_on_any_other_transition_is_refused():
+    """
+    `spill` only means something under out-of-bounds. Accepting it elsewhere
+    lets a spec claim an effect it never asked for and get silence back.
+    """
+    raises(lambda: br.ClipSpec.parse(
+               {"start": 0, "end": 1, "transition": "crossfade",
+                "spill": [0.5, 1.0, 0.3, 0.8]}, 2, 3.0, 100.0),
+           "only means anything under an out-of-bounds", "spill on a dissolve")
+
+    clip = br.ClipSpec.parse(
+        {"start": 0, "end": 1, "transition": "out-of-bounds",
+         "spill": [0.5, 1.0, 0.3, 0.8]}, 2, 3.0, 100.0)
+    eq(clip.spill, (0.5, 1.0, 0.3, 0.8), "the block it was given")
+
+
+@test
+def a_spill_with_no_area_is_refused():
+    for bad, what in (([0.8, 0.4, 0.2, 0.9], "upside down"),
+                      ([0.4, 0.9, 0.7, 0.7], "no width")):
+        raises(lambda b=bad: br.ClipSpec.parse(
+                   {"start": 0, "end": 1, "transition": "out-of-bounds",
+                    "spill": b}, 2, 3.0, 100.0),
+               "no area", f"a spill that is {what}")
+    raises(lambda: br.ClipSpec.parse(
+               {"start": 0, "end": 1, "transition": "out-of-bounds",
+                "spill": [0.5, 1.4, 0.3, 0.8]}, 2, 3.0, 100.0),
+           "between 0 and 1", "a spill past the frame")
 
 
 
