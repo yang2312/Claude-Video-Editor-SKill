@@ -1,6 +1,6 @@
 ---
 name: cinematic-reel
-description: Cut highlight ranges out of a long video and join them into a short graded reel at any delivery aspect (9:16, 1:1, 16:9). Use when the user wants a promo reel, a highlights cut, a vertical edit for social, or a short film made from existing footage, with colour grading, camera moves on static shots, and transitions. Also use to find safe cut points in a source video.
+description: Cut highlight ranges out of a long video and join them into a short graded reel at any delivery aspect (9:16, 1:1, 16:9). Use when the user wants a promo reel, a highlights cut, a vertical edit for social, or a short film made from existing footage. Covers colour grading and presets, camera moves (zoom, pan, Ken Burns), transitions (crossfade, cut, flash, inverted colour, shake), motion blur and shutter angle, stutter and frame-rate holds, speed ramps and slow motion, glow and bloom, chromatic aberration, input levels, vignette, grain and softness — references/EFFECTS.md is the catalogue of every one of them. Also use to find safe cut points in a source video.
 ---
 
 # Cinematic Reel
@@ -23,6 +23,18 @@ python scripts/build_reel.py --spec highlights.json
 
 Both scripts always print JSON and exit 1 on failure. Errors name the
 offending clip by index. Set `REEL_TRACEBACK=1` for a stack trace.
+
+## Where the effects are listed
+
+[references/EFFECTS.md](references/EFFECTS.md) is the catalogue: every camera
+move, transition, time effect and grade knob, with the exact key that turns it
+on, what it costs, and the combinations that work. Read it when you cannot
+remember what exists.
+
+```bash
+python scripts/build_reel.py --effects   # the same index, out of the code
+python scripts/build_reel.py --grades    # the presets, with their numbers
+```
 
 ## Scan before you pick
 
@@ -297,12 +309,13 @@ it; credit and permission are the user's to arrange.
 
 | | |
 |---|---|
+| `references/EFFECTS.md` | **every effect, with the key that turns it on** |
 | `scripts/scan_source.py` | find cut-safe stretches |
 | `scripts/build_reel.py` | CLI, spec parsing, validation, encoding |
 | `scripts/reel_grade.py` | the look engine |
 | `scripts/reel_timeline.py` | camera moves, framing, placement, transitions |
 | `tests/test_reel.py` | `python tests/test_reel.py` — no pytest, no network |
-| `examples/` | a worked spec |
+| `examples/` | three worked specs: a slow reel, a burst, an anniversary cut |
 
 ```bash
 pip install -r requirements.txt

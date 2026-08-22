@@ -88,6 +88,7 @@ on PATH. Set REEL_TRACEBACK=1 to get a stack trace in the error JSON.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -698,6 +699,87 @@ def ranges_to_clips(text: str) -> list:
     return entries
 
 
+
+# The one-line summary of every effect, keyed by the exact string that turns
+# it on. It lives next to the code so `--effects` can never describe a knob
+# that no longer exists; references/EFFECTS.md is the long form of the same
+# list. A key here with no counterpart in the code is a bug, and the test
+# suite checks for exactly that.
+EFFECT_NOTES = {
+    "zoom-in": "pushes in; the default forward move",
+    "zoom-out": "pulls back; reveals context, belongs on a last clip",
+    "pan-left": "slides left across the frame",
+    "pan-right": "slides right; free slack at 9:16, needs zoom if aspects match",
+    "none": "holds the frame still",
+
+    "crossfade": "dissolve; reads as time passing, and costs a beat",
+    "cut": "hard join; the only way to make a section feel fast",
+    "flash": "white bloom over the join; 'somewhere else now'",
+    "invert": "two frames of inverted colour; reads as a fault, not as light",
+    "invert-r": "the same on red only, so the fault has a colour",
+    "invert-g": "the same on green only",
+    "invert-b": "the same on blue only",
+    "shake": "decaying jitter with a brightness pop, about a third of a second",
+
+    "speed": "below 1 slows, above 1 speeds up. Footage only",
+    "shutter": "motion blur, 0-360 degrees of shutter angle. 180 is film",
+    "shutter_samples": "sub-frames the exposure is built from (default 3)",
+    "stutter": "holds the shot at 8 or 12 frames a second",
+    "zoom": "how far a move travels: 1.10, or [1.0, 1.3] for both ends",
+    "pan": "fraction of the available slack a pan crosses, 0-1",
+    "anchor": "where the crop sits when nothing is moving",
+    "fit": "letterbox instead of cropping",
+
+    "saturation": "1.0 untouched, 0.0 greyscale, above 1 richer",
+    "temperature": "-1 cools toward blue, +1 warms toward amber",
+    "contrast": "separation between dark and light, around 1.0",
+    "lift": "raises the black point - the milky shadows of aged film",
+    "gamma": "below 1 brightens midtones, above 1 deepens them",
+    "black": "input level: everything below this is crushed to zero",
+    "white": "input level: everything above this is blown out",
+    "glow": "light spilling out of the highlights. Spatial, so it costs time",
+    "glow_threshold": "where that spill starts, as a fraction of brightness",
+    "rgb_split": "chromatic aberration, in pixels of red/blue separation",
+    "vignette": "corner falloff, which pulls the eye to the middle",
+    "grain": "luminance noise. 0.03 is film, 0.10-0.15 is short-form",
+    "softness": "blend toward a blurred copy; old lenses were not sharp",
+}
+
+
+def describe_effects() -> str:
+    """
+    The whole vocabulary, grouped the way an editor reaches for it.
+
+    Printed rather than returned as JSON because this exists to be read by
+    someone who cannot remember what the skill can do.
+    """
+    from reel_grade import Look
+
+    def rows(title, names, note=""):
+        width = max(len(n) for n in names)
+        out = [title, "-" * len(title)]
+        if note:
+            out.append(note)
+        out += [f"  {n:<{width}}  {EFFECT_NOTES[n]}" for n in names]
+        return "\n".join(out)
+
+    knobs = [f.name for f in dataclasses.fields(Look)]
+    blocks = [
+        rows("Camera moves  (clip key: motion)", list(MOTIONS)),
+        rows("Transitions   (clip key: transition)", list(TRANSITIONS),
+             "  set on the incoming clip; clip 0 can only cut"),
+        rows("Time          (clip keys)",
+             ["speed", "shutter", "shutter_samples", "stutter"]),
+        rows("Framing       (clip keys)", ["zoom", "pan", "anchor", "fit"]),
+        rows("Grade knobs   (clip key: grade)", knobs,
+             "  free except glow and rgb_split, which are spatial"),
+        "Grade presets\n-------------\n  " + ", ".join(sorted(PRESETS))
+        + "\n  --grades prints them with their numbers",
+        "Long form: references/EFFECTS.md",
+    ]
+    return "\n\n".join(blocks)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Cut highlights out of a video and join them into one reel")
@@ -732,7 +814,13 @@ def main() -> int:
                         help="Show an encoding progress bar on stderr")
     parser.add_argument("--grades", action="store_true",
                         help="List the grade presets and exit")
+    parser.add_argument("--effects", action="store_true",
+                        help="List every effect and exit")
     args = parser.parse_args()
+
+    if args.effects:
+        print(describe_effects())
+        return 0
 
     if args.grades:
         print(json.dumps({name: vars(look) for name, look in PRESETS.items()},

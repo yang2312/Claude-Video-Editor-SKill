@@ -46,6 +46,10 @@ installed or on PATH.
 
 Three levers do the work:
 
+Every effect is catalogued in
+[`references/EFFECTS.md`](.claude/skills/cinematic-reel/references/EFFECTS.md),
+or run `build_reel.py --effects` to print the same index out of the code.
+
 **Grade** — `vintage`, `faded`, `warm`, `vivid`, `opium`, `dirty`, `none`, or
 thirteen knobs of your own (`saturation`, `temperature`, `contrast`, `lift`,
 `gamma`, `black`, `white`, `glow`, `glow_threshold`, `rgb_split`, `vignette`,

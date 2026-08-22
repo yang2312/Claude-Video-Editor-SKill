@@ -1412,6 +1412,70 @@ def the_new_transitions_render_end_to_end():
 
 # --------------------------------------------------------------------- main
 
+# ------------------------------------------------------- the effect catalogue
+#
+# The catalogue is documentation, and documentation rots. These three tests
+# pin it to the code: a knob added to Look or a transition added to the tuple
+# fails here until it has been written down in both places.
+
+
+def _every_effect_name():
+    """Every string a spec can use to turn something on."""
+    import dataclasses
+    names = set(rt.MOTIONS) | set(rt.TRANSITIONS)
+    names |= {f.name for f in dataclasses.fields(rg.Look)}
+    names |= {"speed", "shutter", "shutter_samples", "stutter",
+              "zoom", "pan", "anchor", "fit"}
+    return names
+
+
+@test
+def the_catalogue_names_every_effect_the_code_has():
+    missing = sorted(_every_effect_name() - set(br.EFFECT_NOTES))
+    if missing:
+        raise AssertionError(
+            "EFFECT_NOTES is missing " + ", ".join(missing)
+            + " — a new effect has to be written down where people look for it")
+
+
+@test
+def the_catalogue_has_nothing_the_code_does_not():
+    orphans = sorted(set(br.EFFECT_NOTES) - _every_effect_name())
+    if orphans:
+        raise AssertionError(
+            "EFFECT_NOTES describes " + ", ".join(orphans)
+            + " — which no longer exists in the code")
+
+
+@test
+def the_effects_flag_prints_the_whole_vocabulary():
+    code, text = run_cli("--effects")
+    eq(code, 0, "exit code")
+    for name in sorted(_every_effect_name()):
+        if name not in text:
+            raise AssertionError(f"--effects never mentions {name!r}")
+    for preset in rg.PRESETS:
+        if preset not in text:
+            raise AssertionError(f"--effects never mentions the {preset!r} preset")
+
+
+@test
+def the_reference_document_names_every_effect():
+    path = os.path.join(os.path.dirname(HERE), "references", "EFFECTS.md")
+    if not os.path.exists(path):
+        raise AssertionError("references/EFFECTS.md is gone")
+    with open(path, encoding="utf-8") as handle:
+        doc = handle.read()
+    missing = [n for n in sorted(_every_effect_name()) if f"`{n}`" not in doc]
+    if missing:
+        raise AssertionError(
+            "EFFECTS.md never mentions " + ", ".join(missing))
+    for preset in rg.PRESETS:
+        if f"`{preset}`" not in doc:
+            raise AssertionError(f"EFFECTS.md never mentions the {preset!r} preset")
+
+
+
 def main() -> int:
     wanted = sys.argv[1] if len(sys.argv) > 1 else ""
     chosen = [f for f in _tests if wanted in f.__name__]
