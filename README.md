@@ -69,10 +69,16 @@ frames of inverted colour, which reads as a fault rather than as light and
 lands harder between very short cuts; `shake` is a decaying jitter with a
 brightness pop.
 
-For the fast, high-energy cut there are three more levers: `shutter` puts
+`shutter-shake` is a shake with the exposure left open across it, `film-roll`
+is the strip yanked through the gate — a section break rather than a shot
+change — and `out-of-bounds` drops the picture into a bordered frame and lets
+a block of it break through.
+
+For the fast, high-energy cut there are four more levers: `shutter` puts
 motion blur under a move so a four-frame push does not read as a slideshow,
-`stutter` holds a shot at a lower frame rate for a choppy look, and `speed`
-ramps the clip you land on.
+`ease: "impact"` spends almost all of a move in its first fifth so a zoom
+snaps rather than glides, `stutter` holds a shot at a lower frame rate for a
+choppy look, and `speed` ramps the clip you land on.
 
 Full key reference is in [SKILL.md](SKILL.md).
 

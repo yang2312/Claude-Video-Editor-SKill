@@ -95,7 +95,7 @@ MARK_SECONDS = {"invert": 2 / 30.0, "invert-r": 2 / 30.0, "invert-g": 2 / 30.0,
 # Punctuation that straddles the junction instead of following it, and the
 # full width of that straddle. A flash is here in spirit but takes its width
 # from the crossfade, so it stays special-cased.
-STRADDLE_SECONDS = {"film-roll": 0.62}
+STRADDLE_SECONDS = {"film-roll": 0.44}
 
 _CHANNEL = {"invert-r": 0, "invert-g": 1, "invert-b": 2}
 
@@ -952,7 +952,7 @@ def _shake(frame: np.ndarray, progress: float, index: int,
     return popped.astype(np.uint8)
 
 
-def _film_roll(frame: np.ndarray, progress: float, pulled: int = 2,
+def _film_roll(frame: np.ndarray, progress: float, pulled: int = 1,
                gap_fraction: float = 0.038, step: float = 0.0) -> np.ndarray:
     """
     The strip yanked through the gate.
@@ -976,8 +976,8 @@ def _film_roll(frame: np.ndarray, progress: float, pulled: int = 2,
     gap = max(2, int(round(height * gap_fraction)))
     period = height + gap
 
-    # Two whole frame-heights in six tenths of a second is over 300 pixels
-    # per frame at the midpoint. Sampled once, that is not fast motion but
+    # A whole frame-height in four tenths of a second is over 200 pixels per
+    # frame at the midpoint. Sampled once, that is not fast motion but
     # aliasing: every frame lands somewhere unrelated to the last and the
     # strip strobes rather than moves.
     #

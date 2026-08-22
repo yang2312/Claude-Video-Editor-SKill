@@ -325,7 +325,7 @@ it; credit and permission are the user's to arrange.
 | `scripts/reel_grade.py` | the look engine |
 | `scripts/reel_timeline.py` | camera moves, framing, placement, transitions |
 | `tests/test_reel.py` | `python tests/test_reel.py` — no pytest, no network |
-| `examples/` | three worked specs: a slow reel, a burst, an anniversary cut |
+| `examples/` | four worked specs: a slow reel, a burst, an anniversary cut, an effect-led shot list |
 
 ```bash
 pip install -r requirements.txt
