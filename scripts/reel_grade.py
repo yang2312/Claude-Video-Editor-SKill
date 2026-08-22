@@ -23,10 +23,15 @@ What survives per frame:
 
     one matrix multiply, one table lookup, one multiply, one add.
 
-Everything else in this module exists to make sure that stays true: scratch
-buffers are pooled so a frame allocates nothing, looks are interned so five
-clips sharing a preset share one compiled object, and neutral parameters drop
-out of the chain entirely rather than multiplying by one.
+Everything else in this module exists to make sure that stays true: the
+intermediate buffers are pooled and reused, looks are interned so five clips
+sharing a preset share one compiled object and one vignette mask, and neutral
+parameters drop out of the chain entirely rather than multiplying by one.
+
+The pooling covers intermediates, not the result. A table lookup cannot write
+into a pre-allocated buffer, and the caller may hold a frame across a
+crossfade long after the next one is computed, so the frame handed back is
+always freshly allocated.
 
 `softness` lives here as a parameter but is applied during framing, where the
 image is still a PIL image and a blur is cheap. It is part of the look, so it
@@ -75,10 +80,6 @@ class Look:
     vignette: float = 0.0
     grain: float = 0.0
     softness: float = 0.0
-
-    @property
-    def is_neutral(self) -> bool:
-        return self == Look()
 
     @property
     def touches_pixels(self) -> bool:
@@ -169,8 +170,44 @@ def _scratch(key: str, shape: tuple, dtype) -> np.ndarray:
 
 
 def release_scratch() -> None:
-    """Drop the shared working memory. Call once a render is finished."""
+    """Drop the shared working memory. Prefer release_all()."""
     _SCRATCH.clear()
+
+
+def cache_stats() -> dict:
+    """
+    What this module is currently holding, in objects and megabytes.
+
+    An observable, so a test can assert that looks are interned and that
+    release_all() works without reaching for module-private dictionaries —
+    whose names and shapes are internal performance decisions.
+    """
+    mask_bytes = sum(m.nbytes for m in _MASKS.values())
+    scratch_bytes = sum(b.nbytes for b in _SCRATCH.values())
+    grain_bytes = sum(g._grain.nbytes for g in Grade._cache.values()
+                      if g._grain is not None)
+    return {
+        "grades": len(Grade._cache),
+        "masks": len(_MASKS),
+        "buffers": len(_SCRATCH),
+        "megabytes": round((mask_bytes + scratch_bytes + grain_bytes) / 1e6, 1),
+    }
+
+
+def release_all() -> None:
+    """
+    Free everything this module holds: scratch, interned grades, and masks.
+
+    There used to be two cleanup calls and three caches, and the one they both
+    missed was the largest: a vignette mask is 25 MB at 1080x1920, cached by
+    (strength, size), and nothing cleared it. Clearing the interned grades did
+    not help either, because the mask cache still held the references.
+
+    One call, so there is nothing left to forget.
+    """
+    _SCRATCH.clear()
+    _MASKS.clear()
+    Grade.forget_all()
 
 
 # -------------------------------------------------------------------- grade
@@ -229,10 +266,17 @@ class Grade:
         self._grain, self._grain_stride = _grain_field(look.grain, width, height)
 
         # A final clip costs two passes over a 25 MB buffer, so only pay for
-        # it when something can actually leave 0..255. A lookup table can't —
-        # its entries are already bytes — and a vignette only scales down.
-        # Grain adds, and an unclipped linear stage can overshoot on contrast.
-        bounded = self._tone_lut is not None or self._channel_lut is not None
+        # it when something can actually leave 0..255. Three ways to be safe:
+        # a lookup table's entries are already bytes; an identity linear stage
+        # passes the uint8 input straight through; and a vignette only scales
+        # down. Only grain adds, and only an unclipped linear stage can
+        # overshoot on contrast.
+        #
+        # That third case used to be missing, so a vignette-only look paid a
+        # clip that provably could not do anything, on every frame.
+        bounded = (self._tone_lut is not None
+                   or self._channel_lut is not None
+                   or self._matrix_t is None)
         self._needs_clip = self._grain is not None or not bounded
 
     # -- construction ----------------------------------------------------
@@ -256,8 +300,35 @@ class Grade:
 
     @classmethod
     def forget_all(cls) -> None:
-        """Drop interned grades. Call alongside release_scratch()."""
+        """Drop interned grades. Called by release_all(); prefer that."""
         cls._cache.clear()
+
+    @property
+    def vignette(self):
+        """
+        The falloff mask as a single channel, or None.
+
+        Exposed because the equivalence test needs the exact mask to compare
+        against, and reaching for the private attribute would pin the fact
+        that it is stored expanded to three channels — which is a speed
+        decision that should stay free to change.
+        """
+        if self._vignette is None:
+            return None
+        return self._vignette[:, :, :1]
+
+    @property
+    def path(self) -> str:
+        """
+        Which of the three per-frame paths this look compiled to.
+
+        "lut"      one table lookup per channel — the cheapest
+        "matrix"   a 3x3 multiply, for anything that mixes channels
+        "none"     no tonal stage at all; only vignette and grain
+        """
+        if self._channel_lut is not None:
+            return "lut"
+        return "matrix" if self._matrix_t is not None else "none"
 
     # -- application -----------------------------------------------------
 

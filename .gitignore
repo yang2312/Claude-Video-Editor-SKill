@@ -3,5 +3,4 @@ __pycache__/
 *.mp4
 *.mov
 *.mkv
-!examples/*.json
 .DS_Store

@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """
-Framing and the timeline — where the picture comes from, and when.
+The camera move, the framing, and the timeline.
 
-Two ideas live here.
+Three ideas live here.
+
+**CameraMove** is where a shot's motion is decided, once. It exists because
+its absence caused four separate bugs: `motion`, `zoom`, `pan` and `anchor`
+used to travel as four loose numbers that two framing classes each interpreted
+for themselves, in different parameter orders, disagreeing about what counts
+as movement. A pan in fit mode rendered a frozen shot. The same spec animated
+under one framing and froze under the other. Nothing reported any of it.
+
+So the eased-zoom and eased-pan arithmetic is written once, here, and both
+framings call it. They differ only in where their slack comes from.
 
 **Framing** decides which rectangle of the source ends up on screen. Cutting
 16:9 footage to 9:16 throws away two thirds of the width, and a window that
 moves across that slack is what lets one locked-off drone shot read as two
-different angles. It is also the only camera move a still photograph has.
+different angles. It is also the only camera move a photograph has.
 
 **Timeline** places finished shots on one clock and answers `frame(t)`.
 
@@ -22,25 +32,27 @@ and the two rare cases pay only when they happen:
     crossfade  two shots overlap, so blend them — about 5% of frames
     flash      a white bloom over a junction — about 3% of frames
 
-The old code wrapped the entire timeline in another clip to add the flash,
-which made every frame in the reel pay a full float32 conversion for an
-effect that touches thirteen of them.
+Owning placement means owning its limits too. `plan()` is the single
+implementation of the placement rule *and* of what the rule cannot express:
+at most two shots may overlap, because `frame()` blends two, and no shot may
+be swallowed whole by its neighbour's dissolve. Callers validate by planning,
+so the constraint can never drift from the code that depends on it.
 
-Owning placement also fixes a quieter bug: moviepy's `subclipped` shares one
-ffmpeg reader with its parent, so during a crossfade two shots reading from
-different points of the same file made the decoder seek back and forth on
-every frame. Here each shot opens its own reader, on first use, and closes it
-the moment the timeline moves past — so at most two are ever open.
+Each shot opens its own ffmpeg reader, on first use, and closes it when the
+clock moves past — moviepy's `subclipped` shares one reader with its parent,
+which made two shots crossfading from different points of the same file seek
+back and forth on every frame.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 
-from reel_grade import Grade, Look
+from reel_grade import Grade
 
 MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right")
 
@@ -54,8 +66,33 @@ TRANSITIONS = ("crossfade", "cut", "flash")
 # Ken Burns reel read as mechanical rather than filmed.
 _AUTO_CYCLE = ("zoom-in", "pan-right", "zoom-out", "pan-left")
 
+# What a zoom-in or zoom-out travels when the spec does not say.
+DEFAULT_ZOOM = 1.10
+
+# How much sharpness a draft is allowed to trade for speed.
+#
+#   "quality" — LANCZOS everywhere. The default, and what a delivery should
+#               use: it is the only setting that leaves the picture alone.
+#   "fast"    — BICUBIC when enlarging, LANCZOS when shrinking. Enlarging has
+#               no detail to alias, so the extra taps buy a different kind of
+#               edge rather than more of it; measured 25 ms against 34 ms on a
+#               9:16 crop out of 1080p, about 6% off a whole render. Worth it
+#               for a draft you will look at once, not for a master.
+#
+# Shrinking stays on LANCZOS in both modes. There the wide support is not a
+# preference — it is what stops a downscale from aliasing.
+RESAMPLE_MODES = ("quality", "fast")
+
 
 def auto_motion(index: int) -> str:
+    """
+    The move for clip `index` when the spec says "auto".
+
+    Rotating on the clip's own index only guarantees no repeat when *every*
+    clip is auto; mixing auto with explicit moves can still put two of a kind
+    together. The spec layer warns about that rather than this function
+    guessing what the neighbours were.
+    """
     return _AUTO_CYCLE[index % len(_AUTO_CYCLE)]
 
 
@@ -65,46 +102,158 @@ def ease(p: float) -> float:
     return p * p * (3.0 - 2.0 * p)
 
 
-def zoom_range(zoom, motion: str) -> tuple:
+# -------------------------------------------------------------- camera move
+
+@dataclass(frozen=True)
+class CameraMove:
     """
-    Resolve a shot's zoom into (start, end) scale factors.
+    One shot's motion, fully resolved.
 
-    `zoom` is either a number — the far end of a move that starts at 1.0 — or
-    an explicit [start, end] pair. The pair matters when a shot needs to begin
-    already tight: a wide establishing frame that has dead space at the edges
-    should not spend its first second showing that dead space.
+    `zoom` is always a (start, end) pair by the time it lives here — the
+    scalar form in a spec is shorthand, and resolving it at the edge is what
+    stops the rest of the code from having to know which motions a scalar
+    applies to. It applies to all of them:
+
+        zoom-in     1.10  ->  (1.00, 1.10)   travel out to in
+        zoom-out    1.10  ->  (1.10, 1.00)   travel in to out
+        pan-*       1.10  ->  (1.10, 1.10)   held tight while sliding
+        none        1.10  ->  (1.10, 1.10)   held tight, no move
+
+    Those last two rows are the fix for a silent drop: a scalar zoom under a
+    pan used to resolve to (1.0, 1.0) and vanish. Omitting `zoom` entirely
+    still means "no zoom" for pans, so specs written before this keep their
+    framing exactly.
     """
-    if isinstance(zoom, (list, tuple)):
-        if len(zoom) != 2:
-            raise ValueError(f"zoom pair must have exactly 2 values, got {list(zoom)}")
-        a, b = (float(v) for v in zoom)
-        if a < 1.0 or b < 1.0:
-            raise ValueError(f"zoom values must be >= 1.0, got {list(zoom)}")
-        return a, b
 
-    z = float(zoom)
-    if z < 1.0:
-        raise ValueError(f"zoom must be >= 1.0, got {z}")
-    if motion == "zoom-in":
-        return 1.0, z
-    if motion == "zoom-out":
-        return z, 1.0
-    return 1.0, 1.0
+    motion: str = "none"
+    zoom: tuple = (1.0, 1.0)
+    pan: float = 0.30
+    anchor: tuple = (0.5, 0.5)
 
+    # -- construction ----------------------------------------------------
 
-# How much sharpness a draft is allowed to trade for speed.
-#
-#   "quality" — LANCZOS everywhere. The default, and what a delivery should
-#               use: it is the only setting that leaves the picture alone.
-#   "fast"    — BICUBIC when enlarging, LANCZOS when shrinking. Enlarging has
-#               no detail to alias, so the extra taps buy a different kind of
-#               edge rather than more of it; measured 25 ms against 34 ms on a
-#               9:16 crop out of 1080p, which is about 6% off a whole render.
-#               Worth it for a draft you will look at once, not for a master.
-#
-# Shrinking stays on LANCZOS in both modes. There the wide support is not a
-# preference — it is what stops a downscale from aliasing.
-RESAMPLE_MODES = ("quality", "fast")
+    @classmethod
+    def resolve(cls, motion="none", zoom=None, pan=0.30, anchor=0.5,
+                where: str = "clip") -> "CameraMove":
+        """
+        Build a move from spec values, rejecting anything unrenderable.
+
+        `where` names the offending clip in every error, because a spec with
+        nine clips and one bad number is otherwise a guessing game.
+        """
+        if motion not in MOTIONS:
+            raise ValueError(
+                f"{where} has unknown motion {motion!r}; expected one of "
+                f"{', '.join(MOTIONS)} or 'auto'")
+
+        pan = float(pan)
+        if not 0.0 <= pan <= 1.0:
+            raise ValueError(f"{where} pan must be between 0 and 1, got {pan}")
+
+        return cls(motion=motion, zoom=cls._resolve_zoom(zoom, motion, where),
+                   pan=pan, anchor=cls._resolve_anchor(anchor, where))
+
+    @staticmethod
+    def _resolve_anchor(anchor, where: str) -> tuple:
+        """A number places the window horizontally; a pair places both axes."""
+        if isinstance(anchor, (list, tuple)):
+            if len(anchor) != 2:
+                raise ValueError(
+                    f"{where} anchor pair must have exactly 2 values, "
+                    f"got {list(anchor)}")
+            pair = tuple(float(v) for v in anchor)
+        else:
+            pair = (float(anchor), 0.5)
+
+        for value, axis in zip(pair, ("horizontal", "vertical")):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"{where} {axis} anchor must be between 0 and 1, got {value}")
+        return pair
+
+    @staticmethod
+    def _resolve_zoom(zoom, motion: str, where: str) -> tuple:
+        if zoom is None:
+            # No zoom asked for. A zoom move still needs somewhere to travel.
+            if motion == "zoom-in":
+                return 1.0, DEFAULT_ZOOM
+            if motion == "zoom-out":
+                return DEFAULT_ZOOM, 1.0
+            return 1.0, 1.0
+
+        if isinstance(zoom, (list, tuple)):
+            if len(zoom) != 2:
+                raise ValueError(
+                    f"{where} zoom pair must have exactly 2 values, got {list(zoom)}")
+            start, end = (float(v) for v in zoom)
+        else:
+            z = float(zoom)
+            if motion == "zoom-in":
+                start, end = 1.0, z
+            elif motion == "zoom-out":
+                start, end = z, 1.0
+            else:
+                start = end = z
+
+        for value in (start, end):
+            if value < 1.0:
+                raise ValueError(f"{where} zoom values must be >= 1.0, got {value}")
+        return start, end
+
+    # -- what it does ----------------------------------------------------
+
+    @property
+    def zooms(self) -> bool:
+        return self.zoom[0] != self.zoom[1]
+
+    @property
+    def pans(self) -> bool:
+        return self.motion in ("pan-left", "pan-right") and self.pan != 0.0
+
+    @property
+    def widest(self) -> float:
+        """The largest scale the move reaches — where a pan's slack comes from."""
+        return max(self.zoom)
+
+    def is_static(self, has_slack: bool) -> bool:
+        """
+        True when every frame frames the source identically.
+
+        A framing supplies `has_slack` because slack is the one thing the two
+        framings genuinely disagree about: cropping gets it free from the
+        aspect difference, fit only gets it by zooming past the frame edge.
+        Everything else about "does this move" is decided here, so the two can
+        no longer answer it differently for the same spec.
+        """
+        return not self.zooms and not (self.pans and has_slack)
+
+    # -- the arithmetic, written once ------------------------------------
+
+    def scale_at(self, progress: float) -> float:
+        """The eased zoom at this point through the shot."""
+        start, end = self.zoom
+        return start + (end - start) * ease(progress)
+
+    def offset_at(self, progress: float, slack: float) -> float:
+        """
+        Where the window sits along `slack`, eased.
+
+        A pan spends `self.pan` of the available slack, centred on the anchor,
+        so moving the anchor moves the whole travel rather than clipping it.
+        """
+        if slack <= 1.0:
+            return max(0.0, self.anchor[0] * slack)
+
+        if self.pans:
+            span = slack * self.pan
+            left = self.anchor[0] * slack - span / 2.0
+            if self.motion == "pan-left":
+                left, span = left + span, -span
+            left += span * ease(progress)
+        else:
+            left = self.anchor[0] * slack
+
+        return max(0.0, min(slack, left))
 
 
 def _resampler(scale: float, mode: str = "quality"):
@@ -122,6 +271,10 @@ def _soften(img: Image.Image, amount: float) -> Image.Image:
     costs time in proportion to pixel count, so a quarter of the pixels is a
     quarter of the work, and blurring something that is about to be blurred
     hides the interpolation completely.
+
+    Applied during framing, which is *before* the grade — so grain lands on
+    top of the softness rather than under it, which is the order film works
+    in. `Look.softness` is the parameter; this is where it is spent.
     """
     if amount <= 0:
         return img
@@ -205,15 +358,12 @@ class CropFraming:
     """
     A window of the output's aspect ratio, moving across the source.
 
-    The window is what carries the camera move. `zoom` scales it, `pan` slides
-    it, `anchor` says where it sits when it is not sliding, and everything is
-    eased so the move accelerates and settles rather than starting at full
-    speed.
+    Slack is free here: a 16:9 source cut to 9:16 leaves two thirds of the
+    width unused, so a pan has somewhere to go even at zoom 1.0.
     """
 
     def __init__(self, source_size: tuple, out_w: int, out_h: int,
-                 motion: str, zoom, pan: float, anchor: float, softness: float,
-                 resample: str = "quality"):
+                 move: CameraMove, softness: float, resample: str = "quality"):
         W, H = source_size
         aspect = out_w / out_h
         if W / H >= aspect:
@@ -223,46 +373,36 @@ class CropFraming:
 
         self._source_size = (W, H)
         self._out = (out_w, out_h)
-        self._motion = motion
-        self._anchor = anchor
-        self._pan = pan
+        self._move = move
         self._softness = softness
         self._resample = resample
-        self._zoom = zoom_range(zoom, motion)
 
-        # A shot with no move has one window for its whole length, so resolve
-        # it now and skip the arithmetic on every frame.
-        self._fixed = self._window(0.0) if motion == "none" else None
+        # A shot that never moves has one window for its whole length, so
+        # resolve it now and skip the arithmetic on every frame.
+        self._fixed = self._window(0.0) if self.static else None
+
+    @property
+    def slack(self) -> float:
+        """Horizontal room at the widest point of the move."""
+        base_w, _ = self._base
+        return self._source_size[0] - base_w / self._move.widest
 
     @property
     def static(self) -> bool:
-        """True when every frame of this shot frames the source identically."""
-        return self._fixed is not None
+        return self._move.is_static(self.slack > 1.0)
 
     def _window(self, progress: float) -> tuple:
-        e = ease(progress)
-        z_start, z_end = self._zoom
-        z = z_start + (z_end - z_start) * e
+        z = self._move.scale_at(progress)
         base_w, base_h = self._base
         W, H = self._source_size
         w, h = base_w / z, base_h / z
-
-        slack = W - w
-        if self._motion in ("pan-left", "pan-right") and slack > 1:
-            span = slack * self._pan
-            left = self._anchor * slack - span / 2.0
-            if self._motion == "pan-left":
-                left, span = left + span, -span
-            left += span * e
-        else:
-            left = self._anchor * slack
-
-        left = max(0.0, min(slack, left))
-        top = max(0.0, min(H - h, (H - h) / 2.0))
+        left = self._move.offset_at(progress, W - w)
+        top = max(0.0, min(H - h, self._move.anchor[1] * (H - h)))
         return left, top, w, h
 
     def apply(self, img: Image.Image, progress: float) -> np.ndarray:
-        left, top, w, h = self._window(progress) if self._fixed is None else self._fixed
+        window = self._fixed if self._fixed is not None else self._window(progress)
+        left, top, w, h = window
         out_w, out_h = self._out
         # PIL fuses crop and resize when given a box, so the pixels outside
         # the window are never touched.
@@ -280,31 +420,20 @@ class FitFraming:
     photograph — where a 9:16 crop would cut the words in half. The bed is
     built once from the middle of the shot, so it does not shimmer.
 
-    Fit honours `motion` the same way cropping does. It did not always: an
-    earlier version ignored zoom and pan here entirely, so a spec asking for a
-    slow push on a letterboxed archival photo rendered a completely static
-    shot and said nothing about it. A move that a spec asks for and does not
-    get is worse than one that is refused, because nothing in the output tells
-    you it is missing.
-
-    The difference from cropping is only what the move is allowed to cost.
-    Zooming past 1.0 grows the picture wider than the frame, so the sides go
-    outside — which is the trade the shot is already making in reverse, and it
-    stays centred on whatever `anchor` names.
+    Unlike cropping, fit has no free slack: the picture is sized to the output
+    width, so at zoom 1.0 there is nothing for a pan to travel across. A pan
+    here needs a zoom above 1.0 to make room, and the spec layer refuses the
+    combination rather than rendering a frozen shot and calling it a success.
     """
 
     def __init__(self, source_size: tuple, out_w: int, out_h: int,
                  softness: float, bed_frame: Image.Image,
-                 resample: str = "quality", motion: str = "none",
-                 zoom=1.0, pan: float = 0.30, anchor: float = 0.5):
+                 move: CameraMove, resample: str = "quality"):
         W, H = source_size
         self._out = (out_w, out_h)
         self._softness = softness
         self._resample = resample
-        self._motion = motion
-        self._anchor = anchor
-        self._pan = pan
-        self._zoom = zoom_range(zoom, motion)
+        self._move = move
 
         cover = max(out_w / W, out_h / H)
         bw, bh = max(1, int(W * cover)), max(1, int(H * cover))
@@ -317,19 +446,19 @@ class FitFraming:
 
         base_h = max(2, int(round(out_w * H / W)))
         self._base_size = (out_w, base_h - base_h % 2)
-        self._source_aspect = W / H
+
+    @property
+    def slack(self) -> float:
+        """Horizontal room, which only a zoom past 1.0 can create."""
+        return max(0.0, self._base_size[0] * self._move.widest - self._out[0])
 
     @property
     def static(self) -> bool:
-        """True when every frame of this shot frames the source identically."""
-        moving_pan = self._motion in ("pan-left", "pan-right") and self._pan != 0
-        return self._zoom[0] == self._zoom[1] and not moving_pan
+        return self._move.is_static(self.slack > 1.0)
 
     def apply(self, img: Image.Image, progress: float) -> np.ndarray:
         out_w, out_h = self._out
-        e = ease(progress)
-        z_start, z_end = self._zoom
-        z = z_start + (z_end - z_start) * e
+        z = self._move.scale_at(progress)
 
         base_w, base_h = self._base_size
         fg_w = max(2, int(round(base_w * z)))
@@ -340,17 +469,8 @@ class FitFraming:
                      self._softness)
 
         # Whatever grew past the frame goes outside it, anchored where asked.
-        slack_x = max(0, fg_w - out_w)
-        if self._motion in ("pan-left", "pan-right") and slack_x > 1:
-            span = slack_x * self._pan
-            left = self._anchor * slack_x - span / 2.0
-            if self._motion == "pan-left":
-                left, span = left + span, -span
-            left += span * e
-        else:
-            left = self._anchor * slack_x
-        left = int(round(max(0, min(slack_x, left))))
-        top = max(0, fg_h - out_h) // 2
+        left = int(round(self._move.offset_at(progress, max(0, fg_w - out_w))))
+        top = int(round(self._move.anchor[1] * max(0, fg_h - out_h)))
 
         visible_w = min(fg_w, out_w)
         visible_h = min(fg_h, out_h)
@@ -364,6 +484,21 @@ class FitFraming:
         return canvas
 
 
+def build_framing(source, fit: bool, move: CameraMove, out_w: int, out_h: int,
+                  softness: float, resample: str = "quality"):
+    """
+    Choose and configure the framing one clip asks for.
+
+    The one decision this owns is the bed source: it comes from the middle of
+    the shot rather than the first frame, because an opening frame is often a
+    fade-in and a bed built from black stays black for the whole shot.
+    """
+    if fit:
+        middle = source.frame(getattr(source, "duration", 0.0) / 2.0)
+        return FitFraming(source.size, out_w, out_h, softness, middle, move, resample)
+    return CropFraming(source.size, out_w, out_h, move, softness, resample)
+
+
 # --------------------------------------------------------------------- shot
 
 class Shot:
@@ -371,12 +506,17 @@ class Shot:
     One finished piece of picture: source, framing and grade, resolved.
 
     `frame(t, index)` returns a uint8 (H, W, 3) array at the output geometry.
-    `index` selects the grain phase; it is the frame's own number, so grain
-    moves with the picture rather than crawling at a different rate.
+    `index` is the frame's own number on the timeline; it selects the grain
+    phase, so grain moves with the picture rather than crawling at its own
+    rate.
+
+    `frames_built` counts how many times the framing stage actually ran, so
+    the freeze optimisation below can be observed through the interface rather
+    than by reaching into a private attribute for it.
     """
 
     __slots__ = ("source", "framing", "grade", "duration", "label",
-                 "grade_name", "_freezable", "_frozen")
+                 "grade_name", "freezable", "frames_built", "_frozen")
 
     def __init__(self, source, framing, grade: Optional[Grade],
                  duration: float, label: str = "", grade_name: str = "none"):
@@ -392,8 +532,9 @@ class Shot:
         # times to get eighty-four identical arrays is the most avoidable work
         # in the renderer — so frame it once. Grain still moves, because that
         # happens after this point.
-        self._freezable = (not isinstance(source, ClipSource)
-                           and getattr(framing, "static", False))
+        self.freezable = (not isinstance(source, ClipSource)
+                          and getattr(framing, "static", False))
+        self.frames_built = 0
         self._frozen = None
 
     def frame(self, t: float, index: int) -> np.ndarray:
@@ -401,7 +542,8 @@ class Shot:
         if arr is None:
             progress = 0.0 if self.duration <= 0 else t / self.duration
             arr = self.framing.apply(self.source.frame(t), progress)
-            if self._freezable:
+            self.frames_built += 1
+            if self.freezable:
                 self._frozen = arr
         if self.grade is None:
             return arr
@@ -412,57 +554,113 @@ class Shot:
         self.source.release()
 
 
-def build_framing(source, spec: dict, out_w: int, out_h: int, look: Look,
-                  resample: str = "quality"):
-    """Choose and configure the framing one clip asks for."""
-    if spec["fit"]:
-        # The bed comes from the middle of the shot rather than the first
-        # frame — an opening frame is often a fade-in, and a bed built from
-        # black stays black for the whole shot.
-        return FitFraming(source.size, out_w, out_h, look.softness,
-                          source.frame(getattr(source, "duration", 0.0) / 2.0),
-                          resample, spec["motion"], spec["zoom"], spec["pan"],
-                          spec["anchor"])
-    return CropFraming(source.size, out_w, out_h, spec["motion"], spec["zoom"],
-                       spec["pan"], spec["anchor"], look.softness, resample)
-
-
 # ----------------------------------------------------------------- timeline
+
+@dataclass(frozen=True)
+class Placement:
+    """Where one shot sits on the reel's clock."""
+
+    start: float
+    end: float
+    index: int
+
+    @property
+    def length(self) -> float:
+        return self.end - self.start
+
+
+def plan(durations: list, transitions: list, crossfade: float) -> list:
+    """
+    Lay durations out on one clock, or say why they cannot be.
+
+    One rule: a crossfading shot starts `crossfade` seconds before the
+    previous one ends; everything else starts exactly when the previous one
+    ends. That rule is what makes the back half of a reel feel faster than the
+    front — hard cuts remove the dissolve's built-in pause, independently of
+    how long the clips are.
+
+    This function is also the only statement of what the rule cannot express,
+    and it lives here rather than in the validator because `Timeline.frame` is
+    where the limits come from:
+
+      * a dissolve eats into *both* neighbours, so a clip shorter than the
+        overlap is swallowed whole — and the previous validator measured only
+        the incoming side, which let a 0.2 s clip disappear completely while
+        the render reported success;
+
+      * `frame()` blends exactly two layers, so three shots overlapping is not
+        a tighter edit, it is a frame the renderer cannot draw. The previous
+        validator permitted it and the oldest shot was dropped in silence.
+
+    Callers validate a reel by planning it. A constraint stated anywhere else
+    drifts away from the code that depends on it.
+    """
+    if len(transitions) != len(durations):
+        raise ValueError(
+            f"{len(durations)} clips but {len(transitions)} transitions")
+
+    placements, cursor = [], 0.0
+    for i, duration in enumerate(durations):
+        if duration <= 0:
+            raise ValueError(f"clips[{i}] has no length")
+
+        # The first shot has nothing to dissolve from, so it always cuts in.
+        kind = "cut" if i == 0 else transitions[i]
+        if kind == "crossfade" and crossfade > 0:
+            start = cursor - crossfade
+            if start <= placements[-1].start:
+                raise ValueError(
+                    f"clips[{i - 1}] is {placements[-1].length:.2f}s but the "
+                    f"crossfade into clips[{i}] is {crossfade}s — it would be "
+                    f"swallowed whole and never appear. Shorten the crossfade, "
+                    f"lengthen clips[{i - 1}], or make clips[{i}] a cut.")
+            start = max(0.0, start)
+        else:
+            start = cursor
+
+        placements.append(Placement(start, start + duration, i))
+        cursor = start + duration
+
+    for a, b, c in zip(placements, placements[1:], placements[2:]):
+        if c.start < a.end:
+            raise ValueError(
+                f"clips[{a.index}], clips[{b.index}] and clips[{c.index}] would all "
+                f"be on screen at {c.start:.2f}s. A dissolve blends two shots, not "
+                f"three — the crossfade ({crossfade}s) must be shorter than half of "
+                f"clips[{b.index}] ({b.length:.2f}s).")
+
+    return placements
+
 
 class Timeline:
     """
     Every shot on one clock, with the transitions between them.
 
-    Placement follows one rule: a crossfading shot starts `crossfade` seconds
-    before the previous one ends, and everything else starts exactly when the
-    previous one ends. That single rule is what makes the back half of a reel
-    feel faster than the front — hard cuts remove the dissolve's built-in
-    pause, independently of how long the clips are.
+    Placement and its limits come from `plan()`; this class adds playback.
+    Constructing a Timeline therefore validates it — an unrenderable reel
+    raises here rather than producing a wrong one.
     """
 
     def __init__(self, shots: list, transitions: list, crossfade: float,
                  fps: int, flash_strength: float = 0.93):
+        # The frame rate is here for exactly one reason: `frame(t)` has to
+        # name the frame's own number, which is what the grain phase advances
+        # on. All the placement arithmetic below is in seconds.
         self.fps = fps
         self._strength = flash_strength
         # Wide enough to bloom and decay rather than strobe, which is both
         # uglier and harder to watch; narrow enough to stay a punctuation mark.
-        self._half = max(0.10, min(0.22, (crossfade or 0.3) * 0.6))
+        self._half = max(0.10, min(0.22, (crossfade if crossfade > 0 else 0.3) * 0.6))
 
-        self.placements = []
-        self.flashes = []
-        cursor = 0.0
-        for i, shot in enumerate(shots):
-            kind = "cut" if i == 0 else transitions[i]
-            if kind == "crossfade" and crossfade > 0:
-                start = max(0.0, cursor - crossfade)
-            else:
-                start = cursor
-                if kind == "flash":
-                    self.flashes.append(start)
-            self.placements.append((start, start + shot.duration, shot, start))
-            cursor = start + shot.duration
+        self.shots = shots
+        self.placements = plan([s.duration for s in shots], transitions, crossfade)
+        # Clip 0 always cuts in, so a flash asked for there has nothing to
+        # flash between. `plan` drops it; this drops it from the bloom list
+        # for the same reason, and the spec layer is what warns about it.
+        self.flashes = [p.start for p, kind in zip(self.placements, transitions)
+                        if p.index > 0 and kind == "flash"]
 
-        self.duration = cursor
+        self.duration = self.placements[-1].end if self.placements else 0.0
         self._crossfade = crossfade
         self._cursor = 0
 
@@ -477,20 +675,23 @@ class Timeline:
             # can land a hair past the final shot's end.
             active = [self.placements[-1]]
 
-        start, _, shot, origin = active[-1]
-        out = shot.frame(min(t - origin, shot.duration), index)
+        over = active[-1]
+        out = self._draw(over, t, index)
 
         if len(active) > 1:
             under = active[-2]
             weight = 1.0 if self._crossfade <= 0 else min(
-                1.0, max(0.0, (t - start) / self._crossfade))
-            out = _blend(under[2].frame(min(t - under[3], under[2].duration), index),
-                         out, weight)
+                1.0, max(0.0, (t - over.start) / self._crossfade))
+            out = _blend(self._draw(under, t, index), out, weight)
 
         amount = self._flash_amount(t)
         if amount > 0:
             out = _bloom(out, amount)
         return out
+
+    def _draw(self, placement: Placement, t: float, index: int) -> np.ndarray:
+        shot = self.shots[placement.index]
+        return shot.frame(min(t - placement.start, shot.duration), index)
 
     def _active(self, t: float) -> list:
         """
@@ -500,22 +701,22 @@ class Timeline:
         last one finished and shots are released as the clock passes them.
         Seeking backwards is still correct — it just rewinds the cursor.
         """
-        if t < self.placements[self._cursor][0]:
+        if t < self.placements[self._cursor].start:
             self._cursor = 0
 
         active = []
         i = self._cursor
         while i < len(self.placements):
-            start, end, shot, _ = self.placements[i]
-            if start > t:
+            placement = self.placements[i]
+            if placement.start > t:
                 break
-            if t < end:
+            if t < placement.end:
                 if not active:
                     self._cursor = i
-                active.append(self.placements[i])
+                active.append(placement)
             elif i == self._cursor:
                 # Fully behind us and nothing overlaps it any more.
-                shot.release()
+                self.shots[placement.index].release()
                 self._cursor = i + 1
             i += 1
         return active
@@ -529,7 +730,7 @@ class Timeline:
         return best
 
     def release(self) -> None:
-        for _, _, shot, _ in self.placements:
+        for shot in self.shots:
             shot.release()
 
 

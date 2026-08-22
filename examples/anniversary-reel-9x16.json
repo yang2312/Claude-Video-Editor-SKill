@@ -1,8 +1,7 @@
 {
-  "_comment": "Worked example: a 15s 9:16 promo reel for a school's 30th anniversary, cut from a 3-minute 16:9 drone video. Shape: an archival photo of the old gate held 2.8s under a vintage grade, a white flash into the present day, then clips that get shorter and grades that get richer so the back half accelerates. Every range was taken from a clean stretch reported by scan_source.py — the source has 152 dip-to-black samples in it.",
+  "_comment": "Worked example: a 15s 9:16 promo reel for a school's 30th anniversary, cut from a 3-minute 16:9 drone video. Shape: an archival photo of the old gate held 2.8s under a vintage grade, a white flash into the present day, then clips that get shorter and grades that get richer so the back half accelerates. 'guard' points at scan_source.py output — the source has 152 dip-to-black samples in it, and every range below is checked against them before anything is encoded.",
   "source": "source.mp4",
   "output": "reel.mp4",
-  "aspect": "9:16",
   "size": "1080x1920",
   "fps": 30,
   "crossfade": 0.35,
@@ -41,7 +40,7 @@
       "fit": true,
       "grade": "warm",
       "transition": "cut",
-      "label": "Bien ten truong - dinh danh, giu nguyen khung ngang. Vung sach 9.00-13.25"
+      "label": "Bien ten truong - dinh danh, giu nguyen khung ngang"
     },
     {
       "start": 20.6,
@@ -54,7 +53,7 @@
       ],
       "grade": "warm",
       "transition": "cut",
-      "label": "Bang-ron 'DEN TRUONG LA MOT NIEM VUI' - goc mat dat. Vung sach 18.75-22.75 (khoang cu 22.4-23.9 vat qua dip-to-black o 23.1)"
+      "label": "Bang-ron 'DEN TRUONG LA MOT NIEM VUI' - goc mat dat"
     },
     {
       "start": 152.8,
@@ -113,7 +112,8 @@
       ],
       "grade": "vivid",
       "transition": "crossfade",
-      "label": "Ha canh - toan canh, giu lau nhat, chua khoang trong dat chu 30 NAM. Vung sach 170.62-173.62"
+      "label": "Ha canh - toan canh, giu lau nhat, chua khoang trong dat chu 30 NAM"
     }
-  ]
+  ],
+  "guard": "scan.json"
 }
