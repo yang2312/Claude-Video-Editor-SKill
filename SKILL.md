@@ -122,6 +122,7 @@ comes from the source); `size` yields exactly what it says.
 | `stutter` | 0 | hold the shot at this many frames a second |
 | `fit` | false | letterbox instead of cropping |
 | `grade` | — | a preset name, or an object of overrides |
+| `ease` | `"smooth"` | `smooth`, or `impact` for a snap |
 | `transition` | `"crossfade"` | see below |
 | `label` | `""` | free text, echoed in the report |
 
@@ -188,6 +189,9 @@ can still put two of a kind together, and the report warns when it does.
 | `invert` | two frames of inverted colour |
 | `invert-r`, `invert-g`, `invert-b` | the same on one channel, so the fault has a colour |
 | `shake` | a decaying jitter with a brightness pop, about a third of a second |
+| `shutter-shake` | the same with the shutter open, so each jolt smears |
+| `film-roll` | the strip yanked through the gate; a section break |
+| `out-of-bounds` | a bordered frame with one block of picture breaking out |
 
 A reel that dissolves throughout has one tempo. Shortening clips *and*
 switching to hard cuts is what makes a back half accelerate.
@@ -250,12 +254,18 @@ for a choppy frame rate, `glow` on the highlights.
  "zoom": 1.35, "shutter": 180, "transition": "invert"}
 ```
 
-Four things from that vocabulary are **not** reachable here, because they need
-per-object segmentation and tracking rather than pixel maths: masking a person
-out of the background, locking a subject in frame, a silhouette glow, and the
-out-of-bounds effect where a subject breaks the edge of the frame. An editor
-with a modern NLE has those; this does not, and faking them with pixel maths
-looks wrong.
+Three things from that vocabulary are **not** reachable here, because they
+need per-object segmentation and tracking rather than pixel maths: masking a
+person out of the background, locking a subject in frame, and a silhouette
+glow traced around a body. An editor with a modern NLE has those; this does
+not, and faking them with pixel maths looks wrong.
+
+A fourth, **out-of-bounds**, is reachable as far as pixel maths can take it.
+The `out-of-bounds` transition draws the border and lets a named rectangle of
+picture break through it. What it cannot do is find the subject, so the block
+is geometry, not an outline. On a shot where something real crosses that block
+it reads correctly; on a shot where the block cuts through empty ground it
+reads as a rectangle. Choose the shot.
 
 ## Encoding
 

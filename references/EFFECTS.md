@@ -25,12 +25,16 @@ key.
 | `zoom` | clip key | `1.10` or `[1.0, 1.3]` | how far the move travels |
 | `pan` | clip key | `0.0`–`1.0` | how much of the slack a pan crosses |
 | `anchor` | clip key | `[0.5, 0.4]` | where the crop sits when it is not moving |
+| `ease` | clip key | `smooth`/`impact` | how a move spends its time |
 | `crossfade` | `transition` | — | dissolve; reads as time passing |
 | `cut` | `transition` | — | hard join; the only way to feel fast |
 | `flash` | `transition` | — | white bloom over the join |
 | `invert` | `transition` | — | two frames of inverted colour |
 | `invert-r` `invert-g` `invert-b` | `transition` | — | the same on one channel |
 | `shake` | `transition` | — | decaying jitter with a brightness pop |
+| `shutter-shake` | `transition` | — | the same with the shutter open, so it smears |
+| `film-roll` | `transition` | — | the strip yanked through the gate |
+| `out-of-bounds` | `transition` | — | a bordered frame with one block breaking out |
 | `speed` | clip key | `0.5`–`2.0` | slow motion or fast motion |
 | `shutter` | clip key | `0`–`360` | motion blur under this renderer's move |
 | `shutter_samples` | clip key | `2`+ | how smooth that blur is |
@@ -99,6 +103,29 @@ At 9:16 this is the most useful move available, and the one that rescues a
 wide composition the crop would otherwise cut in half — a sign too long to
 fit reads end to end if the frame walks along it.
 
+### `ease`
+
+*easing, impact zoom, punch, snap zoom, giật zoom, zoom nhanh*
+
+```json
+{"motion": "zoom-out", "zoom": [1.9, 1.0], "ease": "impact", "shutter": 240}
+```
+
+How a move spends its time, which is the whole difference between a camera
+pushed and a camera *thrown*.
+
+`smooth` is the default: slow at both ends, what an operator on a slider does.
+`impact` puts **41% of the travel in the first tenth of the clip** and 67% in
+the first fifth, then settles for the rest — what a hand does when it snaps a
+zoom out and lets go.
+
+Pair `impact` with a `shutter`. Without one, the first three frames each land
+somewhere far from the last and the eye reads dropped frames rather than
+speed; that is the same failure motion blur exists to fix, just concentrated.
+
+It applies to pans as well as zooms, because it changes the clock, not the
+geometry.
+
 ### `anchor`
 
 *framing, composition, đặt khung, căn khung*
@@ -165,6 +192,57 @@ in one reel do not move in step.
 
 This is the whole of what a "flashy shake preset" is — a transform and a
 brightness curve, nothing else.
+
+### `shutter-shake`
+
+*shutter shake, impact shake, rung nhoè, giật mạnh*
+
+A `shake` with the shutter left open across it. A plain shake steps: every
+frame is sharp, somewhere else than the last, and the eye reads a sequence of
+stills. This one averages the jolt in progress, which is what a real camera
+records — the difference between a camera knocked and a camera hit.
+
+Costs four framing passes on about eleven frames. Nothing, at that count.
+
+### `film-roll`
+
+*film roll, reel change, projector, cuộn phim, chuyển cảnh phim*
+
+The strip yanked through the gate. A projector normally hides the mechanism:
+it holds one frame still, pulls the next down behind a closed shutter, opens
+again. Yank the strip by hand and you see what it hides — the picture sliding
+up, and the black frame-line between exposures crossing the gate.
+
+The picture scrolls by three whole frame-heights, a whole number so the strip
+lands registered instead of parked halfway. The sideways weave and the dip in
+the lamp are part of it: without them this reads as a scrolling web page.
+
+It straddles the junction rather than following it, so the section ending and
+the section arriving are on the same strip. That is what makes it a **section
+break** — use it between movements, not between shots.
+
+### `out-of-bounds`
+
+*out of bounds, frame break, phá khung, vượt khung*
+
+The picture drops into a bordered frame, and one block of it keeps going past
+the border.
+
+**Read this before using it.** The real effect masks a *subject* — a person, a
+car — so that the subject crosses the border while the background stays
+inside. That needs per-object segmentation, which this module does not have.
+What it has is a rectangle: the block it names keeps its full-strength picture
+and its full width, and everything outside the border is dimmed and
+desaturated into a backdrop.
+
+On a shot where something real occupies that block — a near roofline, a tree,
+a building edge crossing the lower frame — it reads correctly, because the eye
+takes the break as evidence of depth rather than tracing the outline. On a
+shot where the block cuts through empty ground it reads as what it is, a
+rectangle. **Choose the shot, not the knob.**
+
+It lasts 1.3 seconds: the frame draws in, holds long enough to be understood
+as a frame, and releases. Anything shorter is a flicker rather than an idea.
 
 ---
 
@@ -391,13 +469,18 @@ cut does not register at all.
 
 ## Not in the catalogue
 
-Four things from the short-form vocabulary are **not** reachable here, because
-they need per-object segmentation and tracking rather than pixel maths:
+Three things from the short-form vocabulary are **not** reachable here,
+because they need per-object segmentation and tracking rather than pixel
+maths:
 
 - masking a person out of the background
 - locking a subject in frame while the world moves around it
 - a silhouette glow traced around a body
-- out-of-bounds, where a subject breaks the edge of the frame
 
 An editor with a modern NLE has those. Faking them with pixel maths looks
 wrong, so this does not try.
+
+**Out-of-bounds is the half case.** [`out-of-bounds`](#out-of-bounds) draws the
+border and breaks a rectangle of picture through it, which is everything about
+the effect except the part that needs a subject mask. Its entry says plainly
+what that costs.

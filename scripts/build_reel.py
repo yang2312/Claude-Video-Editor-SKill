@@ -57,6 +57,8 @@ Per clip:
     fit             letterbox the whole frame on a blurred bed instead of
                     cropping — for shots whose meaning spans the full width
     grade           a preset name, or an object of overrides
+    ease            how a move spends its time: smooth (default) or impact,
+                    which puts almost all the travel in the first fifth
     transition      how it joins the clip before it:
                       crossfade  dissolve; reads as time passing
                       cut        hard join; the only way to feel fast
@@ -66,6 +68,12 @@ Per clip:
                       invert-g   a colour; alternate them across a burst
                       invert-b
                       shake      decaying jitter with a brightness pop
+                      shutter-shake  the same with the shutter open, so each
+                                 jolt smears instead of stepping
+                      film-roll  the strip yanked through the gate; belongs
+                                 between sections, not between shots
+                      out-of-bounds  the picture drops into a bordered frame
+                                 and one block breaks out of it
     label           free text, echoed in the report
 
 Keys starting with `_` are ignored, so a spec can carry comments. Anything
@@ -101,9 +109,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from reel_grade import (Grade, Look, PRESETS, release_all,  # noqa: E402
                         resolve_look)
 from reel_timeline import (MARK_SECONDS, MOTIONS, RESAMPLE_MODES,  # noqa: E402
-                           TRANSITIONS, CameraMove, ClipSource, Shot,
-                           StillSource, Timeline, auto_motion, build_framing,
-                           plan)
+                           STRADDLE_SECONDS, TRANSITIONS, CameraMove,
+                           ClipSource, Shot, StillSource, Timeline,
+                           auto_motion, build_framing, plan)
 
 # x264 effort levels, cheapest first. Named here so a typo is caught at parse
 # time rather than surfacing as an opaque ffmpeg failure ten minutes in.
@@ -199,8 +207,8 @@ def reject_unknown(entry: dict, allowed, where: str) -> None:
 
 CLIP_KEYS = frozenset({
     "start", "end", "duration", "image", "anchor", "speed", "motion", "zoom",
-    "pan", "fit", "grade", "transition", "label", "shutter", "shutter_samples",
-    "stutter",
+    "pan", "ease", "fit", "grade", "transition", "label", "shutter",
+    "shutter_samples", "stutter",
 })
 
 REEL_KEYS = frozenset({
@@ -288,7 +296,8 @@ class ClipSpec:
             motion = auto_motion(index)
         move = CameraMove.resolve(motion=motion, zoom=entry.get("zoom"),
                                   pan=float(entry.get("pan", 0.30)),
-                                  anchor=entry.get("anchor", 0.5), where=where)
+                                  anchor=entry.get("anchor", 0.5),
+                                  curve=entry.get("ease", "smooth"), where=where)
 
         fit = bool(entry.get("fit", False))
         if fit and move.pans and move.widest <= 1.0:
@@ -305,7 +314,8 @@ class ClipSpec:
             raise ValueError(
                 f"{where} has unknown transition {transition!r}; expected one "
                 "of " + ", ".join(TRANSITIONS))
-        if index == 0 and (transition == "flash" or transition in MARK_SECONDS):
+        if index == 0 and (transition == "flash" or transition in MARK_SECONDS
+                           or transition in STRADDLE_SECONDS):
             raise ValueError(
                 f"clips[0] asks for {transition!r}, which marks a junction — "
                 f"and the first clip has nothing before it.")
@@ -720,6 +730,9 @@ EFFECT_NOTES = {
     "invert-g": "the same on green only",
     "invert-b": "the same on blue only",
     "shake": "decaying jitter with a brightness pop, about a third of a second",
+    "shutter-shake": "the same with the shutter open, so each jolt smears",
+    "film-roll": "the strip yanked through the gate, frame-lines and all",
+    "out-of-bounds": "a bordered frame, with one block of picture breaking out",
 
     "speed": "below 1 slows, above 1 speeds up. Footage only",
     "shutter": "motion blur, 0-360 degrees of shutter angle. 180 is film",
@@ -728,6 +741,7 @@ EFFECT_NOTES = {
     "zoom": "how far a move travels: 1.10, or [1.0, 1.3] for both ends",
     "pan": "fraction of the available slack a pan crosses, 0-1",
     "anchor": "where the crop sits when nothing is moving",
+    "ease": "how a move spends its time: smooth, or impact for a snap",
     "fit": "letterbox instead of cropping",
 
     "saturation": "1.0 untouched, 0.0 greyscale, above 1 richer",
@@ -770,7 +784,8 @@ def describe_effects() -> str:
              "  set on the incoming clip; clip 0 can only cut"),
         rows("Time          (clip keys)",
              ["speed", "shutter", "shutter_samples", "stutter"]),
-        rows("Framing       (clip keys)", ["zoom", "pan", "anchor", "fit"]),
+        rows("Framing       (clip keys)",
+             ["zoom", "pan", "anchor", "ease", "fit"]),
         rows("Grade knobs   (clip key: grade)", knobs,
              "  free except glow and rgb_split, which are spatial"),
         "Grade presets\n-------------\n  " + ", ".join(sorted(PRESETS))

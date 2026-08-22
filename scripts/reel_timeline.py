@@ -71,14 +71,32 @@ MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right")
 #   shake     — a decaying positional jitter with a brightness pop, about a
 #               third of a second. It is what a "flashy shake" preset is: a
 #               transform and a brightness curve, nothing else.
+#   shutter-shake — a shake with the shutter left open across it, so each
+#               jolt smears instead of stepping. The difference between a
+#               camera knocked and a camera knocked *hard*.
+#   film-roll — the strip yanked through the gate: the picture scrolls up
+#               with black frame-lines passing through it. Reads as a reel
+#               change, which is why it belongs between sections rather than
+#               between shots.
+#   out-of-bounds — the picture drops into a bordered frame and one block of
+#               it keeps going past the border. See `_out_of_bounds` for what
+#               this can and cannot do without a subject mask.
 TRANSITIONS = ("crossfade", "cut", "flash", "invert", "invert-r", "invert-g",
-               "invert-b", "shake")
+               "invert-b", "shake", "shutter-shake", "film-roll",
+               "out-of-bounds")
 
 # Punctuation that lands *after* a junction rather than across it, and how
 # long each one lasts. A flash is the exception — it blooms symmetrically
 # around the cut, so its width is derived from the crossfade instead.
 MARK_SECONDS = {"invert": 2 / 30.0, "invert-r": 2 / 30.0, "invert-g": 2 / 30.0,
-                "invert-b": 2 / 30.0, "shake": 9 / 30.0}
+                "invert-b": 2 / 30.0, "shake": 9 / 30.0,
+                "shutter-shake": 11 / 30.0, "out-of-bounds": 1.30}
+
+# Punctuation that straddles the junction instead of following it, and the
+# full width of that straddle. A flash is here in spirit but takes its width
+# from the crossfade, so it stays special-cased.
+STRADDLE_SECONDS = {"film-roll": 0.62}
+
 _CHANNEL = {"invert-r": 0, "invert-g": 1, "invert-b": 2}
 
 # Rotated so adjacent shots never repeat a move — the thing that makes a
@@ -115,9 +133,21 @@ def auto_motion(index: int) -> str:
     return _AUTO_CYCLE[index % len(_AUTO_CYCLE)]
 
 
-def ease(p: float) -> float:
-    """Smoothstep. Camera moves that start and stop abruptly read as cheap."""
+# How a move spends its time. The curve is not decoration: it is the whole
+# difference between a camera pushed and a camera *thrown*.
+#
+#   smooth — smoothstep, slow at both ends. What a operator on a slider does.
+#   impact — almost all the travel in the first fifth, then a long settle.
+#            What a hand does when it snaps a zoom out and lets go. Pair it
+#            with a shutter or the first frames read as dropped, not fast.
+EASINGS = ("smooth", "impact")
+
+
+def ease(p: float, curve: str = "smooth") -> float:
+    """Where a move has got to, at progress `p`, under the named curve."""
     p = 0.0 if p < 0.0 else (1.0 if p > 1.0 else p)
+    if curve == "impact":
+        return 1.0 - (1.0 - p) ** 5.0
     return p * p * (3.0 - 2.0 * p)
 
 
@@ -148,12 +178,13 @@ class CameraMove:
     zoom: tuple = (1.0, 1.0)
     pan: float = 0.30
     anchor: tuple = (0.5, 0.5)
+    curve: str = "smooth"
 
     # -- construction ----------------------------------------------------
 
     @classmethod
     def resolve(cls, motion="none", zoom=None, pan=0.30, anchor=0.5,
-                where: str = "clip") -> "CameraMove":
+                curve="smooth", where: str = "clip") -> "CameraMove":
         """
         Build a move from spec values, rejecting anything unrenderable.
 
@@ -169,8 +200,14 @@ class CameraMove:
         if not 0.0 <= pan <= 1.0:
             raise ValueError(f"{where} pan must be between 0 and 1, got {pan}")
 
+        if curve not in EASINGS:
+            raise ValueError(
+                f"{where} has unknown ease {curve!r}; expected one of "
+                + ", ".join(EASINGS))
+
         return cls(motion=motion, zoom=cls._resolve_zoom(zoom, motion, where),
-                   pan=pan, anchor=cls._resolve_anchor(anchor, where))
+                   pan=pan, anchor=cls._resolve_anchor(anchor, where),
+                   curve=curve)
 
     @staticmethod
     def _resolve_anchor(anchor, where: str) -> tuple:
@@ -251,7 +288,7 @@ class CameraMove:
     def scale_at(self, progress: float) -> float:
         """The eased zoom at this point through the shot."""
         start, end = self.zoom
-        return start + (end - start) * ease(progress)
+        return start + (end - start) * ease(progress, self.curve)
 
     def offset_at(self, progress: float, slack: float) -> float:
         """
@@ -268,7 +305,7 @@ class CameraMove:
             left = self.anchor[0] * slack - span / 2.0
             if self.motion == "pan-left":
                 left, span = left + span, -span
-            left += span * ease(progress)
+            left += span * ease(progress, self.curve)
         else:
             left = self.anchor[0] * slack
 
@@ -729,7 +766,9 @@ class Timeline:
         # the spec layer is what refuses it up front.
         self.marks = [(p.start, kind)
                       for p, kind in zip(self.placements, transitions)
-                      if p.index > 0 and (kind in MARK_SECONDS or kind == "flash")]
+                      if p.index > 0 and (kind in MARK_SECONDS
+                                          or kind in STRADDLE_SECONDS
+                                          or kind == "flash")]
         self.flashes = [t for t, kind in self.marks if kind == "flash"]
 
         self.duration = self.placements[-1].end if self.placements else 0.0
@@ -804,9 +843,19 @@ class Timeline:
                 if distance < self._half:
                     amount = (1.0 - distance / self._half) ** 1.6 * self._strength
                     out = _bloom(out, amount)
+            elif kind in STRADDLE_SECONDS:
+                half = STRADDLE_SECONDS[kind] / 2.0
+                if -half <= since < half:
+                    out = _film_roll(out, (since + half) / (2.0 * half),
+                                     step=1.0 / max(1.0, self.fps * 2.0 * half))
             elif 0.0 <= since < MARK_SECONDS.get(kind, 0.0):
+                progress = since / MARK_SECONDS[kind]
                 if kind == "shake":
-                    out = _shake(out, since / MARK_SECONDS[kind], index)
+                    out = _shake(out, progress, index)
+                elif kind == "shutter-shake":
+                    out = _shake(out, progress, index, strength=0.034, smear=4)
+                elif kind == "out-of-bounds":
+                    out = _out_of_bounds(out, progress)
                 else:
                     out = _invert(out, _CHANNEL.get(kind))
         return out
@@ -852,13 +901,19 @@ def _invert(frame: np.ndarray, channel: Optional[int]) -> np.ndarray:
 
 
 def _shake(frame: np.ndarray, progress: float, index: int,
-           strength: float = 0.028) -> np.ndarray:
+           strength: float = 0.028, smear: int = 0) -> np.ndarray:
     """
     A decaying positional jitter with a brightness pop.
 
     The offset is derived from the frame's own number, so a re-render is
     identical and two clips at different points of the reel do not shake in
     step. Decay is what separates a shake from a vibration: it has to land.
+
+    `smear` opens the shutter across the jolt. A shake without it steps: each
+    frame is sharp, somewhere else than the last, and the eye reads a
+    sequence of stills rather than one violent movement. With it, each frame
+    is the average of the jolt in progress, which is what a real camera
+    records — and what separates a knock from a hit.
     """
     decay = (1.0 - min(1.0, max(0.0, progress))) ** 1.6
     if decay <= 0.001:
@@ -870,17 +925,176 @@ def _shake(frame: np.ndarray, progress: float, index: int,
     dx = int(round(rng.normal(0.0, reach * width)))
     dy = int(round(rng.normal(0.0, reach * height)))
 
-    out = np.roll(frame, dx, axis=1)
-    if dy:
-        out = np.roll(out, dy, axis=0)
+    if smear >= 2 and (dx or dy):
+        popped = None
+        for k in range(smear):
+            fraction = k / (smear - 1)
+            sample = np.roll(frame, int(round(dx * fraction)), axis=1)
+            step = int(round(dy * fraction))
+            if step:
+                sample = np.roll(sample, step, axis=0)
+            if popped is None:
+                popped = sample.astype(np.float32)
+            else:
+                popped += sample
+        popped /= smear
+    else:
+        out = np.roll(frame, dx, axis=1)
+        if dy:
+            out = np.roll(out, dy, axis=0)
+        popped = out.astype(np.float32)
 
     # The brightness pop is what sells the impact; without it the frame just
     # moves. Kept small — this runs on nine frames, not on a whole shot.
     lift = 1.0 + 0.35 * decay
-    popped = out.astype(np.float32)
     popped *= lift
     np.clip(popped, 0.0, 255.0, out=popped)
     return popped.astype(np.uint8)
+
+
+def _film_roll(frame: np.ndarray, progress: float, pulled: int = 2,
+               gap_fraction: float = 0.038, step: float = 0.0) -> np.ndarray:
+    """
+    The strip yanked through the gate.
+
+    A film projector holds one frame still while the shutter is closed, pulls
+    the next one down, and opens again. Yank the strip by hand and you see
+    what the mechanism normally hides: the picture sliding up, and the black
+    frame-line between exposures crossing the gate.
+
+    That is all this is. The picture scrolls by `pulled` whole frame-heights
+    — a whole number, so the strip lands registered instead of parked
+    halfway — and the gap between frames is painted black as it passes. The
+    content underneath has already cut, so what the eye sees is one section
+    ending and another arriving on the same strip.
+
+    The rattle and the dimming are not garnish: a strip moving that fast in a
+    gate weaves sideways, and the lamp is briefly occluded. Without them this
+    reads as a scrolling web page.
+    """
+    height, width = frame.shape[:2]
+    gap = max(2, int(round(height * gap_fraction)))
+    period = height + gap
+
+    # Two whole frame-heights in six tenths of a second is over 300 pixels
+    # per frame at the midpoint. Sampled once, that is not fast motion but
+    # aliasing: every frame lands somewhere unrelated to the last and the
+    # strip strobes rather than moves.
+    #
+    # Sampling it three or four times does not fix that either — a 300-pixel
+    # step split four ways is four sharp copies 75 pixels apart, which reads
+    # as a ghost, not a smear. What a real exposure does is integrate the
+    # whole step, so that is what this does: one gather, then a box blur as
+    # long as the step along the direction of travel. A box blur of any
+    # length costs one cumulative sum, so the smear is free no matter how
+    # fast the strip is moving.
+    travel = pulled * period * ease(progress)
+    span = 0.0
+    if step > 0.0:
+        span = pulled * period * (ease(min(1.0, progress + step / 2.0))
+                                  - ease(max(0.0, progress - step / 2.0)))
+
+    rows = (np.arange(height) + int(round(travel))) % period
+    lit = rows < height
+    out = np.zeros(frame.shape, dtype=np.float32)
+    out[lit] = frame[rows[lit]]
+
+    reach = int(round(min(height * 0.5, span)))
+    if reach >= 2:
+        pad = reach // 2 + 1
+        padded = np.pad(out, ((pad, pad), (0, 0), (0, 0)), mode="wrap")
+        running = np.empty((padded.shape[0] + 1,) + padded.shape[1:], np.float32)
+        running[0] = 0.0
+        np.cumsum(padded, axis=0, dtype=np.float32, out=running[1:])
+        start = pad - reach // 2
+        out = (running[start + reach:start + reach + height]
+               - running[start:start + height]) / reach
+
+    # The weave. Derived from progress rather than a random draw, so a
+    # re-render is identical.
+    rattle = int(round(float(np.sin(progress * 41.0)) * width * 0.004))
+    if rattle:
+        out = np.roll(out, rattle, axis=1)
+
+    # The lamp dips while the strip is moving fastest, in the middle.
+    dim = 1.0 - 0.26 * (1.0 - abs(progress * 2.0 - 1.0))
+    if dim < 0.999:
+        out = out * dim
+    return out.astype(np.uint8)
+
+
+def _out_of_bounds(frame: np.ndarray, progress: float,
+                   inset: float = 0.085, border: float = 0.009,
+                   spill: tuple = (0.55, 1.0, 0.27, 0.75)) -> np.ndarray:
+    """
+    The picture drops into a bordered frame and one block breaks out of it.
+
+    **What this is not.** The real effect masks a *subject* — a person, a car
+    — and lets that subject cross the border while the background stays
+    inside. That needs per-object segmentation, which this module does not
+    have and cannot fake convincingly. What it has instead is a rectangle:
+    the block named by `spill` keeps its full-strength picture and full
+    width, and everything else outside the border is dimmed and desaturated
+    into a backdrop.
+
+    On footage where something real occupies that block — a near roofline, a
+    tree, a building edge crossing the lower frame — the read is the same,
+    because the eye takes the break as evidence of depth rather than checking
+    the outline. On footage where the block cuts through empty ground it
+    reads as exactly what it is, a rectangle. Choose the shot, not the knob.
+
+    The envelope matters as much as the geometry: the frame draws in, holds
+    long enough to be understood as a frame, and releases. A border that
+    appears and vanishes inside four frames is a flicker, not an idea.
+    """
+    amount = _envelope(progress)
+    if amount <= 0.002:
+        return frame
+
+    height, width = frame.shape[:2]
+    margin_y = int(round(inset * height * amount))
+    margin_x = int(round(inset * width * amount))
+    thickness = max(1, int(round(border * width * amount)))
+
+    top, bottom = margin_y, height - margin_y
+    left, right = margin_x, width - margin_x
+    if bottom - top < 4 or right - left < 4:
+        return frame
+
+    out = frame.astype(np.float32)
+
+    # Everything outside the border becomes backdrop: darker, greyer, and
+    # therefore behind. Done as one blend so it is a single pass.
+    grey = out.mean(axis=2, keepdims=True)
+    backdrop = out * (1.0 - 0.72 * amount) * 0.4 + grey * (1.0 - 0.72 * amount) * 0.6
+
+    outside = np.ones((height, width, 1), dtype=bool)
+    outside[top:bottom, left:right] = False
+    np.copyto(out, backdrop, where=outside)
+
+    # The border itself, drawn on top of the backdrop and under the spill.
+    white = 236.0 * amount + out.mean() * (1.0 - amount)
+    out[top:top + thickness, left:right] = white
+    out[bottom - thickness:bottom, left:right] = white
+    out[top:bottom, left:left + thickness] = white
+    out[top:bottom, right - thickness:right] = white
+
+    # The block that breaks out, restored from the original at full strength.
+    r0, r1, c0, c1 = spill
+    y0, y1 = int(r0 * height), int(r1 * height)
+    x0, x1 = int(c0 * width), int(c1 * width)
+    out[y0:y1, x0:x1] = frame[y0:y1, x0:x1]
+
+    return out.astype(np.uint8)
+
+
+def _envelope(progress: float, rise: float = 0.16, fall: float = 0.24) -> float:
+    """In, hold, out. Punctuation that only rises has no landing."""
+    if progress < rise:
+        return ease(progress / rise)
+    if progress > 1.0 - fall:
+        return ease((1.0 - progress) / fall)
+    return 1.0
 
 
 def _bloom(frame: np.ndarray, amount: float) -> np.ndarray:

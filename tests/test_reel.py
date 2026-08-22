@@ -1425,7 +1425,7 @@ def _every_effect_name():
     names = set(rt.MOTIONS) | set(rt.TRANSITIONS)
     names |= {f.name for f in dataclasses.fields(rg.Look)}
     names |= {"speed", "shutter", "shutter_samples", "stutter",
-              "zoom", "pan", "anchor", "fit"}
+              "zoom", "pan", "anchor", "ease", "fit"}
     return names
 
 
@@ -1473,6 +1473,158 @@ def the_reference_document_names_every_effect():
     for preset in rg.PRESETS:
         if f"`{preset}`" not in doc:
             raise AssertionError(f"EFFECTS.md never mentions the {preset!r} preset")
+
+
+
+# ------------------------------------------------- impact, roll, out of bounds
+#
+# Three effects whose failure mode is the same: they still produce a picture,
+# so nothing raises and the render reports success. What they stop doing is
+# the one thing they exist for.
+
+
+def _edges(frame) -> float:
+    """How much high-frequency detail a frame carries."""
+    grey = frame.astype(np.float32).mean(axis=2)
+    return float((np.diff(grey, axis=0) ** 2).mean()
+                 + (np.diff(grey, axis=1) ** 2).mean())
+
+
+def _picture(height=180, width=120):
+    """A frame with detail at every scale, so blur has something to destroy."""
+    rng = np.random.default_rng(7)
+    y, x = np.mgrid[0:height, 0:width]
+    base = (np.sin(y / 3.0) * 60 + np.cos(x / 2.0) * 60 + 128).astype(np.float32)
+    base += rng.normal(0.0, 18.0, base.shape)
+    return np.clip(np.dstack([base, base * 0.9, base * 1.1]), 0, 255).astype(np.uint8)
+
+
+@test
+def an_impact_ease_front_loads_the_travel():
+    smooth = rt.CameraMove.resolve("zoom-out", [2.0, 1.0])
+    impact = rt.CameraMove.resolve("zoom-out", [2.0, 1.0], curve="impact")
+
+    # A fifth of the way in, the snap has already spent two thirds of itself
+    # and the slider has spent a tenth. That gap is the whole effect.
+    if not impact.scale_at(0.2) < 1.45 < smooth.scale_at(0.2):
+        raise AssertionError(
+            f"impact {impact.scale_at(0.2):.3f} should be well past "
+            f"smooth {smooth.scale_at(0.2):.3f} at a fifth of the way in")
+    close(impact.scale_at(1.0), 1.0, 1e-6, "impact still lands where it was sent")
+    close(impact.scale_at(0.0), 2.0, 1e-6, "impact still starts where it was sent")
+
+
+@test
+def an_unknown_ease_is_refused_by_name():
+    raises(lambda: rt.CameraMove.resolve("zoom-in", 1.2, curve="snap"),
+           "unknown ease", "a misspelled ease")
+
+
+@test
+def regression_a_film_roll_lands_registered():
+    """
+    A strip parked half a frame past the gate is a mistake, not a transition.
+
+    The travel is a whole number of frame-heights for exactly this reason;
+    an off-by-a-gap here would leave every reel using it permanently shifted.
+    """
+    picture = _picture()
+    landed = rt._film_roll(picture, 1.0)
+    for shift in (-2, -1, 0, 1, 2):
+        if np.array_equal(landed, np.roll(picture, shift, axis=1)):
+            return
+    raise AssertionError("the strip did not land back on frame")
+
+
+@test
+def a_film_roll_darkens_the_gate_as_the_frame_line_crosses_it():
+    picture = _picture()
+    mid = rt._film_roll(picture, 0.5)
+    if not float(mid.mean()) < float(picture.mean()) - 15.0:
+        raise AssertionError(
+            f"no frame-line crossed: {picture.mean():.0f} before, "
+            f"{mid.mean():.0f} mid-roll")
+
+
+@test
+def regression_a_film_roll_smears_rather_than_ghosting():
+    """
+    Sampling a 300-pixel step four times gives four sharp copies, not a blur.
+
+    The first attempt did exactly that and read as a ghost. The box blur is
+    what makes it an exposure, so the test is on the detail it destroys.
+    """
+    picture = _picture()
+    step = 1.0 / (30 * rt.STRADDLE_SECONDS["film-roll"])
+    sharp = rt._film_roll(picture, 0.5, step=0.0)
+    smeared = rt._film_roll(picture, 0.5, step=step)
+    if not _edges(smeared) < _edges(sharp) * 0.5:
+        raise AssertionError(
+            f"the roll did not smear: {_edges(sharp):.0f} unblurred, "
+            f"{_edges(smeared):.0f} blurred")
+
+
+@test
+def shutter_shake_smears_where_a_plain_shake_steps():
+    picture = _picture()
+    stepped = rt._shake(picture, 0.1, 7, strength=0.034)
+    smeared = rt._shake(picture, 0.1, 7, strength=0.034, smear=4)
+    if not _edges(smeared) < _edges(stepped) * 0.6:
+        raise AssertionError(
+            f"the shake did not smear: {_edges(stepped):.0f} stepped, "
+            f"{_edges(smeared):.0f} smeared")
+
+
+@test
+def out_of_bounds_keeps_the_spill_and_pushes_the_rest_back():
+    picture = _picture(height=200, width=140)
+    framed = rt._out_of_bounds(picture, 0.5)
+
+    r0, r1, c0, c1 = (0.55, 1.0, 0.27, 0.75)
+    y0, y1 = int(r0 * 200), int(r1 * 200)
+    x0, x1 = int(c0 * 140), int(c1 * 140)
+    if not np.array_equal(framed[y0:y1, x0:x1], picture[y0:y1, x0:x1]):
+        raise AssertionError("the block that breaks out was not left alone")
+
+    corner = float(framed[:6, :6].mean())
+    if not corner < float(picture[:6, :6].mean()) * 0.6:
+        raise AssertionError(
+            f"outside the border was not pushed back: {corner:.0f}")
+
+
+@test
+def out_of_bounds_releases_the_frame_before_the_shot_ends():
+    """A border that never lets go is a crop, not a punctuation mark."""
+    picture = _picture()
+    close(float(np.abs(rt._out_of_bounds(picture, 0.0).astype(np.int16)
+                       - picture.astype(np.int16)).max()), 0.0, 0.5,
+          "nothing at the very start")
+    close(float(np.abs(rt._out_of_bounds(picture, 1.0).astype(np.int16)
+                       - picture.astype(np.int16)).max()), 0.0, 0.5,
+          "nothing left at the very end")
+
+
+@test
+def regression_the_new_punctuation_is_refused_on_the_first_clip():
+    """All three mark a junction, and clip 0 has none."""
+    for kind in ("shutter-shake", "film-roll", "out-of-bounds"):
+        raises(lambda k=kind: br.ClipSpec.parse(
+                   {"start": 0, "end": 1, "transition": k}, 0, 3.0, 100.0),
+               "nothing before it", f"{kind} on clip 0")
+
+
+@test
+def a_film_roll_straddles_its_junction_instead_of_following_it():
+    line = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "film-roll"], 0.0, 30)
+    eq([kind for _, kind in line.marks], ["film-roll"], "the mark is registered")
+
+    before = float(line.frame(0.85).mean())
+    after = float(line.frame(1.15).mean())
+    away = float(line.frame(0.4).mean())
+    if not (before != away and after != away):
+        raise AssertionError(
+            f"the roll did not reach across the junction: {away:.1f} away, "
+            f"{before:.1f} before, {after:.1f} after")
 
 
 
