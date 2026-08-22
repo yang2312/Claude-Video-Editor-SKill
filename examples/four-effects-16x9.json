@@ -1,8 +1,8 @@
 {
-  "_comment": "A shot list built around four effects rather than around a grade: an impact zoom out off a still, a shutter-shake into the first section, a film-roll into the second, and out-of-bounds onto the last shot. Two things in it are worth copying. The still opens letterboxed because the source photograph is 1.49:1 and a 9:16 crop would throw away two thirds of it. And each section is assembled from the clean stretches inside its span rather than played straight through: the source is an edited video whose own transitions fade to black, and a reel that plays those looks broken. scan_source.py finds them; `guard` refuses a range that straddles one.",
+  "_comment": "A shot list built around four effects rather than around a grade: an impact zoom out off a still, a shutter-shake into the first section, a film-roll into the second, and out-of-bounds onto the last shot. Three decisions in it generalise. Delivering 16:9 from a 16:9 source means nothing has to be thrown away, so the moves stay small — a zoom is a crop, and only the two pans go past 1.1, which is what a pan needs at a matching aspect to have anywhere to go at all. `spill` puts the out-of-bounds block over the near buildings rather than over open ground, which is the difference between the effect reading as depth and reading as a rectangle. And each section is assembled from the clean stretches inside its span rather than played straight through: the source is an edited video whose own transitions fade to black, and a reel that plays those looks broken. scan_source.py finds them; `guard` refuses a range that straddles one.",
   "source": "source.mp4",
-  "output": "gate-9x16.mp4",
-  "size": "1080x1920",
+  "output": "gate-16x9.mp4",
+  "size": "1920x1080",
   "fps": 30,
   "crossfade": 0.4,
   "crf": 21,
@@ -11,21 +11,24 @@
     {
       "image": "gate.png",
       "duration": 2.2,
-      "fit": true,
       "motion": "zoom-out",
       "zoom": [
-        2.2,
-        1.32
+        1.45,
+        1.0
+      ],
+      "anchor": [
+        0.5,
+        0.45
       ],
       "ease": "impact",
       "shutter": 240,
       "shutter_samples": 4,
       "grade": {
         "preset": "warm",
-        "vignette": 0.3,
+        "vignette": 0.28,
         "glow": 0.14
       },
-      "label": "the gate - impact zoom out off the sign"
+      "label": "the gate - impact zoom out, and the shake starts here"
     },
     {
       "start": 9.0,
@@ -34,25 +37,24 @@
       "motion": "zoom-in",
       "zoom": [
         1.0,
-        1.1
+        1.06
       ],
       "grade": {
         "preset": "warm",
-        "vignette": 0.26
+        "vignette": 0.22
       },
-      "label": "0:08-0:22 - the gate for real, shaken into"
+      "label": "0:08-0:22 - the gate for real, knocked into"
     },
     {
       "start": 14.12,
       "end": 17.88,
       "transition": "crossfade",
-      "motion": "pan-right",
-      "pan": 0.3,
+      "motion": "none",
       "grade": {
         "preset": "warm",
-        "vignette": 0.26
+        "vignette": 0.22
       },
-      "label": "0:08-0:22 - the walk in"
+      "label": "0:08-0:22 - the walk in, uncropped"
     },
     {
       "start": 18.75,
@@ -60,12 +62,12 @@
       "transition": "crossfade",
       "motion": "zoom-out",
       "zoom": [
-        1.12,
+        1.08,
         1.0
       ],
       "grade": {
         "preset": "warm",
-        "vignette": 0.26
+        "vignette": 0.22
       },
       "label": "0:08-0:22 - under the walkway"
     },
@@ -76,12 +78,12 @@
       "motion": "zoom-in",
       "zoom": [
         1.0,
-        1.08
+        1.06
       ],
       "grade": {
         "preset": "vivid",
-        "glow": 0.18,
-        "vignette": 0.24
+        "glow": 0.16,
+        "vignette": 0.2
       },
       "label": "0:31-1:01 - reel change onto the yard"
     },
@@ -90,11 +92,12 @@
       "end": 39.0,
       "transition": "crossfade",
       "motion": "pan-left",
-      "pan": 0.32,
+      "zoom": 1.16,
+      "pan": 0.5,
       "grade": {
         "preset": "vivid",
-        "glow": 0.18,
-        "vignette": 0.24
+        "glow": 0.16,
+        "vignette": 0.2
       },
       "label": "0:31-1:01 - the facade and the flagpole"
     },
@@ -105,12 +108,12 @@
       "motion": "zoom-in",
       "zoom": [
         1.0,
-        1.12
+        1.08
       ],
       "grade": {
         "preset": "vivid",
-        "glow": 0.18,
-        "vignette": 0.24
+        "glow": 0.16,
+        "vignette": 0.2
       },
       "label": "0:31-1:01 - lifting off"
     },
@@ -118,28 +121,25 @@
       "start": 49.0,
       "end": 54.12,
       "transition": "crossfade",
-      "motion": "zoom-out",
-      "zoom": [
-        1.14,
-        1.0
-      ],
+      "motion": "none",
       "grade": {
         "preset": "vivid",
-        "glow": 0.2,
-        "vignette": 0.24
+        "glow": 0.18,
+        "vignette": 0.2
       },
-      "label": "0:31-1:01 - the campus opening up"
+      "label": "0:31-1:01 - the campus opening up, uncropped"
     },
     {
       "start": 55.0,
       "end": 59.6,
       "transition": "crossfade",
       "motion": "pan-right",
-      "pan": 0.34,
+      "zoom": 1.16,
+      "pan": 0.5,
       "grade": {
         "preset": "vivid",
-        "glow": 0.2,
-        "vignette": 0.24
+        "glow": 0.18,
+        "vignette": 0.2
       },
       "label": "0:31-1:01 - across the roofs"
     },
@@ -147,18 +147,24 @@
       "start": 73.15,
       "end": 75.0,
       "transition": "out-of-bounds",
+      "spill": [
+        0.5,
+        1.0,
+        0.36,
+        0.92
+      ],
       "motion": "zoom-in",
       "zoom": [
         1.0,
-        1.06
+        1.04
       ],
       "grade": {
         "preset": "warm",
-        "glow": 0.52,
+        "glow": 0.5,
         "glow_threshold": 0.46,
-        "vignette": 0.22
+        "vignette": 0.18
       },
-      "label": "1:13-1:15 - the near roofline breaks the frame"
+      "label": "1:13-1:15 - the near buildings break the frame"
     }
   ]
 }
