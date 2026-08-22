@@ -48,10 +48,24 @@ Per clip:
     pan             0..1, how much of the available slack a pan spends
     speed           <1 slows, >1 speeds up (default 1.0). Footage only — a
                     photograph has no time axis for it to act on.
+    shutter         motion blur, in degrees of shutter angle. 0 off, 180 the
+                    film convention, 360 fully open. Blurs this renderer's
+                    own move, which is the part of the picture that has none.
+    shutter_samples how many sub-frames the exposure is built from (default 3)
+    stutter         hold the shot at this many frames a second — 8 or 12 gives
+                    the choppy, posterised look. 0 leaves it smooth.
     fit             letterbox the whole frame on a blurred bed instead of
                     cropping — for shots whose meaning spans the full width
     grade           a preset name, or an object of overrides
-    transition      crossfade | cut | flash — how it joins the clip before it
+    transition      how it joins the clip before it:
+                      crossfade  dissolve; reads as time passing
+                      cut        hard join; the only way to feel fast
+                      flash      hard join under a white bloom
+                      invert     two frames of inverted colour
+                      invert-r   the same on one channel, so the fault has
+                      invert-g   a colour; alternate them across a burst
+                      invert-b
+                      shake      decaying jitter with a brightness pop
     label           free text, echoed in the report
 
 Keys starting with `_` are ignored, so a spec can carry comments. Anything
@@ -85,9 +99,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from reel_grade import (Grade, Look, PRESETS, release_all,  # noqa: E402
                         resolve_look)
-from reel_timeline import (MOTIONS, RESAMPLE_MODES, TRANSITIONS,  # noqa: E402
-                           CameraMove, ClipSource, Shot, StillSource, Timeline,
-                           auto_motion, build_framing, plan)
+from reel_timeline import (MARK_SECONDS, MOTIONS, RESAMPLE_MODES,  # noqa: E402
+                           TRANSITIONS, CameraMove, ClipSource, Shot,
+                           StillSource, Timeline, auto_motion, build_framing,
+                           plan)
 
 # x264 effort levels, cheapest first. Named here so a typo is caught at parse
 # time rather than surfacing as an opaque ffmpeg failure ten minutes in.
@@ -183,7 +198,8 @@ def reject_unknown(entry: dict, allowed, where: str) -> None:
 
 CLIP_KEYS = frozenset({
     "start", "end", "duration", "image", "anchor", "speed", "motion", "zoom",
-    "pan", "fit", "grade", "transition", "label",
+    "pan", "fit", "grade", "transition", "label", "shutter", "shutter_samples",
+    "stutter",
 })
 
 REEL_KEYS = frozenset({
@@ -202,6 +218,9 @@ class ClipSpec:
     image: Optional[str] = None
     speed: float = 1.0
     move: CameraMove = field(default_factory=CameraMove)
+    shutter: float = 0.0
+    shutter_samples: int = 3
+    stutter: float = 0.0
     fit: bool = False
     look: Look = field(default_factory=Look)
     grade_name: str = "none"
@@ -285,15 +304,29 @@ class ClipSpec:
             raise ValueError(
                 f"{where} has unknown transition {transition!r}; expected one "
                 "of " + ", ".join(TRANSITIONS))
-        if index == 0 and transition == "flash":
+        if index == 0 and (transition == "flash" or transition in MARK_SECONDS):
             raise ValueError(
-                "clips[0] asks for a flash, but a flash marks a junction and "
-                "the first clip has nothing before it.")
+                f"clips[0] asks for {transition!r}, which marks a junction — "
+                f"and the first clip has nothing before it.")
+
+        shutter = float(entry.get("shutter", 0.0))
+        if not 0.0 <= shutter <= 360.0:
+            raise ValueError(
+                f"{where} shutter is an angle in degrees, 0 to 360; got {shutter}")
+        shutter_samples = int(entry.get("shutter_samples", 3))
+        if shutter_samples < 2:
+            raise ValueError(
+                f"{where} shutter_samples must be at least 2, got {shutter_samples}")
+
+        stutter = float(entry.get("stutter", 0.0))
+        if stutter < 0:
+            raise ValueError(f"{where} stutter cannot be negative, got {stutter}")
 
         look, grade_name = resolve_look(entry.get("grade"))
 
         return cls(start=start, end=end, image=image, speed=speed, move=move,
-                   fit=fit, look=look, grade_name=grade_name,
+                   shutter=shutter, shutter_samples=shutter_samples,
+                   stutter=stutter, fit=fit, look=look, grade_name=grade_name,
                    transition=transition, label=entry.get("label", ""))
 
 
@@ -412,6 +445,12 @@ class ReelSpec:
         """Things worth saying that are not worth refusing over."""
         notes = []
 
+        for i, clip in enumerate(self.clips):
+            if clip.shutter > 0 and not (clip.move.zooms or clip.move.pans):
+                notes.append(
+                    f"clips[{i}] sets a shutter but has no move for it to blur "
+                    f"— the footage's own motion is already exposed")
+
         moves = [c.move.motion for c in self.clips]
         for i, (a, b) in enumerate(zip(moves, moves[1:]), start=1):
             if a == b and a != "none":
@@ -487,7 +526,10 @@ def build_shots(spec: ReelSpec) -> list:
         framing = build_framing(source, clip.fit, clip.move, out_w, out_h,
                                 clip.look.softness, spec.resample)
         shots.append(Shot(source, framing, Grade.compile(clip.look, out_w, out_h),
-                          duration, clip.label, clip.grade_name))
+                          duration, clip.label, clip.grade_name, fps=spec.fps,
+                          shutter=clip.shutter,
+                          shutter_samples=clip.shutter_samples,
+                          stutter=clip.stutter))
     return shots
 
 
@@ -624,6 +666,8 @@ def render(spec: ReelSpec, progress: bool = False) -> dict:
                 "anchor": list(c.move.anchor),
                 "transition": c.transition,
                 "speed": c.speed,
+                "shutter": c.shutter,
+                "stutter": c.stutter,
                 "fit": c.fit,
                 "label": c.label,
             }

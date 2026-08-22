@@ -105,9 +105,12 @@ comes from the source); `size` yields exactly what it says.
 | `pan` | 0.30 | 0..1, how much of the available slack a pan spends |
 | `anchor` | 0.5 | 0=left … 1=right, or `[x, y]` for both axes |
 | `speed` | 1.0 | <1 slows, >1 speeds up. Footage only |
+| `shutter` | 0 | motion blur, in degrees of shutter angle |
+| `shutter_samples` | 3 | sub-frames the exposure is built from |
+| `stutter` | 0 | hold the shot at this many frames a second |
 | `fit` | false | letterbox instead of cropping |
 | `grade` | — | a preset name, or an object of overrides |
-| `transition` | `"crossfade"` | `crossfade`, `cut`, `flash` |
+| `transition` | `"crossfade"` | see below |
 | `label` | `""` | free text, echoed in the report |
 
 `zoom` means different things per motion, and the report always echoes the
@@ -137,11 +140,26 @@ python scripts/build_reel.py -i source.mp4 -o reel.mp4 \
 ## The three levers that make a reel feel edited
 
 **Grade** carries the story. Presets: `vintage`, `faded`, `warm`, `vivid`,
-`none`. A grade arc — desaturated at the top, saturated at the end — reads as
-time passing without a caption. Override any preset:
-`{"preset": "vintage", "grain": 0.02}`. The eight knobs are `saturation`,
-`temperature`, `contrast`, `lift`, `gamma`, `vignette`, `grain`, `softness`;
-`build_reel.py --grades` prints them all.
+`opium`, `dirty`, `none`. A grade arc — desaturated at the top, saturated at
+the end — reads as time passing without a caption. Override any preset:
+`{"preset": "vintage", "grain": 0.02}`. `build_reel.py --grades` prints every
+preset with its numbers.
+
+The knobs are `saturation`, `temperature`, `contrast`, `lift`, `gamma`,
+`black`, `white`, `glow`, `glow_threshold`, `rgb_split`, `vignette`, `grain`,
+`softness`.
+
+`black` and `white` are input levels: everything below `black` is crushed to
+zero, everything above `white` is blown out. Pulling them together is the
+"extract" look — high contrast, detail only where the light was — and it costs
+nothing, because it folds into the same table as gamma. `glow` spills light
+out of the highlights; `rgb_split` separates red and blue by a few pixels for
+chromatic aberration. Those two are spatial and do cost time; the rest are
+free once the look is compiled.
+
+`opium` and `dirty` are the heavy ones, built to sit under three-frame cuts
+where a subtle grade would not register: `opium` is crushed to near-monochrome
+with blooming highlights, `dirty` is noisy and split.
 
 **Motion** gives one locked-off angle two framings. Cutting 16:9 to 9:16
 throws away two thirds of the width, and the moves spend that slack instead of
@@ -150,12 +168,23 @@ can still put two of a kind together, and the report warns when it does.
 
 **Transition** controls pace, independently of clip length:
 
-- `crossfade` — dissolves; reads as time passing, and costs a beat
-- `cut` — hard join; the only way to make a section feel fast
-- `flash` — hard join under a white bloom; reads as "somewhere else now"
+| | |
+|---|---|
+| `crossfade` | dissolves; reads as time passing, and costs a beat |
+| `cut` | hard join; the only way to make a section feel fast |
+| `flash` | hard join under a white bloom; "somewhere else now" |
+| `invert` | two frames of inverted colour |
+| `invert-r`, `invert-g`, `invert-b` | the same on one channel, so the fault has a colour |
+| `shake` | a decaying jitter with a brightness pop, about a third of a second |
 
 A reel that dissolves throughout has one tempo. Shortening clips *and*
 switching to hard cuts is what makes a back half accelerate.
+
+White reads as light; **inversion reads as a fault in the picture**, which is
+why it lands harder between very short cuts. Alternating the channel across a
+burst — `invert`, then `invert-r`, then `invert-b` — stops a run of them
+turning into a strobe. Punctuation on the first clip is refused: there is
+nothing before it to punctuate.
 
 Two limits are enforced, not documented-and-hoped: a clip cannot be shorter
 than the crossfade that dissolves into it (it would never appear), and no
@@ -178,6 +207,43 @@ place to put a title.
 Fit honours `motion`, growing the picture past the frame edges. A **pan in fit
 mode needs a `zoom` above 1.0** to have anywhere to travel, and is refused
 without one rather than rendering a frozen shot.
+
+
+## Cutting for the short-form look
+
+The fast, high-energy edit has a small and specific vocabulary. All of it is
+reachable from a spec:
+
+**Very short clips.** Three to nine frames — 0.1 to 0.3 seconds at 30fps.
+Shorter is more energy. Set `crossfade` to 0 and use `cut`, or the dissolves
+will eat clips this short (and the planner will refuse the spec if they do).
+
+**A move on every clip, and motion blur under it.** A push from `zoom: 1.35`
+across four frames reads as a slideshow of sharp frames without `shutter`.
+180 is the film convention; 360 is fully open and smears. It only blurs this
+renderer's own move — the footage already carries whatever the camera did —
+so a clip with no move gets a warning rather than wasted work.
+
+**Punctuation between, not dissolves.** `invert` for two frames, alternating
+channels across a burst. `shake` at the end of a run.
+
+**A long clip to land on.** A burst is setup; without something longer after
+it there is nothing to pay it off. Give the last clip `speed` below 1.
+
+**Texture over the top.** `grain` between 0.10 and 0.15, `stutter` at 8 or 12
+for a choppy frame rate, `glow` on the highlights.
+
+```json
+{"start": 12.0, "end": 12.15, "grade": "dirty", "motion": "zoom-in",
+ "zoom": 1.35, "shutter": 180, "transition": "invert"}
+```
+
+Four things from that vocabulary are **not** reachable here, because they need
+per-object segmentation and tracking rather than pixel maths: masking a person
+out of the background, locking a subject in frame, a silhouette glow, and the
+out-of-bounds effect where a subject breaks the edge of the frame. An editor
+with a modern NLE has those; this does not, and faking them with pixel maths
+looks wrong.
 
 ## Encoding
 

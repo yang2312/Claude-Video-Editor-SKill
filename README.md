@@ -46,11 +46,11 @@ installed or on PATH.
 
 Three levers do the work:
 
-**Grade** — `vintage`, `faded`, `warm`, `vivid`, `none`, or eight knobs of
-your own (`saturation`, `temperature`, `contrast`, `lift`, `gamma`,
-`vignette`, `grain`, `softness`). Running a grade *arc* across a reel —
-desaturated at the top, saturated at the end — says "time passed" without a
-caption.
+**Grade** — `vintage`, `faded`, `warm`, `vivid`, `opium`, `dirty`, `none`, or
+thirteen knobs of your own (`saturation`, `temperature`, `contrast`, `lift`,
+`gamma`, `black`, `white`, `glow`, `glow_threshold`, `rgb_split`, `vignette`,
+`grain`, `softness`). Running a grade *arc* across a reel — desaturated at the
+top, saturated at the end — says "time passed" without a caption.
 
 **Motion** — `none` (the default), `zoom-in`, `zoom-out`, `pan-left`,
 `pan-right`, `auto`. Cropping 16:9 to 9:16 throws away two thirds of the
@@ -60,7 +60,15 @@ has.
 
 **Transition** — `crossfade` reads as time passing and costs a beat; `cut` is
 the only thing that makes a section feel fast; `flash` is a white bloom that
-reads as *somewhere else now*, which is what carries a jump between two eras.
+reads as *somewhere else now*. `invert` (and its per-channel variants) is two
+frames of inverted colour, which reads as a fault rather than as light and
+lands harder between very short cuts; `shake` is a decaying jitter with a
+brightness pop.
+
+For the fast, high-energy cut there are three more levers: `shutter` puts
+motion blur under a move so a four-frame push does not read as a slideshow,
+`stutter` holds a shot at a lower frame rate for a choppy look, and `speed`
+ramps the clip you land on.
 
 Full key reference is in [SKILL.md](SKILL.md).
 

@@ -301,6 +301,8 @@ def reference_grade(look: rg.Look, frame: np.ndarray, mask, grain) -> np.ndarray
         f = (f - 0.5) * look.contrast + 0.5
     if look.lift > 0:
         f = f * (1.0 - look.lift) + look.lift
+    if look.black != 0.0 or look.white != 1.0:
+        f = np.clip((f - look.black) / (look.white - look.black), 0.0, 1.0)
     if look.gamma != 1.0:
         f = np.clip(f, 0.0, 1.0) ** look.gamma
     if mask is not None:
@@ -328,8 +330,13 @@ def _check_against_reference(look: rg.Look, label: str) -> None:
 
 @test
 def grade_matches_the_chain_it_replaces():
-    for name in ("vintage", "faded", "warm", "vivid"):
-        _check_against_reference(rg.PRESETS[name], name)
+    from dataclasses import replace
+    for name, look in rg.PRESETS.items():
+        if name == "none":
+            continue
+        # Glow and the split are spatial, so they are not part of the
+        # pointwise chain this compares against; each has its own test.
+        _check_against_reference(replace(look, glow=0.0, rgb_split=0.0), name)
 
 
 @test
@@ -1154,6 +1161,253 @@ def reel_traceback_adds_a_stack_trace():
     eq(code, 1, "exit code")
     if "Traceback" not in payload.get("traceback", ""):
         raise AssertionError("REEL_TRACEBACK did not produce a stack trace")
+
+
+# ------------------------------------------------------------------ effects
+#
+# Everything below came out of studying how short-form edits are actually cut:
+# very short clips, a move on every one of them, motion blur so the move does
+# not read as a slideshow, and hard punctuation between. They are additive —
+# a spec that names none of them renders exactly as before.
+
+@test
+def levels_crush_the_blacks_and_blow_the_whites():
+    grade = rg.Grade.compile(rg.Look(black=0.3, white=0.7), 32, 32)
+    eq(grade.path, "lut", "levels ride the same table as gamma")
+
+    ramp = np.tile(np.linspace(0, 255, 32, dtype=np.uint8)[None, :, None], (32, 1, 3))
+    out = grade.apply(ramp, 0)
+    eq(int(out[0, 0, 0]), 0, "below the black point is crushed")
+    eq(int(out[0, -1, 0]), 255, "above the white point is blown")
+    middle = int(out[0, 16, 0])
+    if not 40 < middle < 215:
+        raise AssertionError(f"the midtones were destroyed too: {middle}")
+
+
+@test
+def levels_that_cross_over_are_refused():
+    raises(lambda: rg.Grade.compile(rg.Look(black=0.8, white=0.2), 32, 32),
+           "must be above", "white below black")
+
+
+@test
+def glow_lifts_the_highlights_and_leaves_the_shadows():
+    frame = np.zeros((80, 80, 3), np.uint8)
+    frame[30:50, 30:50] = 255                     # one bright square
+    grade = rg.Grade.compile(rg.Look(glow=0.8, glow_threshold=0.5), 80, 80)
+    out = grade.apply(frame, 0)
+
+    halo = float(out[30:50, 10:25].mean())        # beside the square
+    far = float(out[0:8, 0:8].mean())             # a corner
+    if halo <= 4:
+        raise AssertionError(f"no bloom spilled out of the highlight ({halo:.1f})")
+    if far > halo * 0.6:
+        raise AssertionError(
+            f"the bloom reached the whole frame ({far:.1f} in a far corner "
+            f"against {halo:.1f} beside the source)")
+
+
+@test
+def rgb_split_moves_red_and_blue_but_not_green():
+    frame = np.zeros((40, 60, 3), np.uint8)
+    frame[:, 28:32] = 200                          # a grey bar
+    out = rg.Grade.compile(rg.Look(rgb_split=3.0), 60, 40).apply(frame, 0)
+
+    row = out[20]
+    red = int(np.argmax(row[:, 0]))
+    green = int(np.argmax(row[:, 1]))
+    blue = int(np.argmax(row[:, 2]))
+    eq(green, int(np.argmax(frame[20][:, 1])), "green stayed where it was")
+    if red >= green or blue <= green:
+        raise AssertionError(
+            f"channels did not separate: red at {red}, green at {green}, blue at {blue}")
+
+
+@test
+def the_short_form_presets_compile_and_are_distinct():
+    for name in ("opium", "dirty"):
+        grade = rg.Grade.compile(rg.PRESETS[name], 64, 64)
+        if grade is None:
+            raise AssertionError(f"{name} compiled to nothing")
+
+    frame = np.tile(np.linspace(0, 255, 64, dtype=np.uint8)[None, :, None], (64, 1, 3))
+    opium = rg.Grade.compile(rg.PRESETS["opium"], 64, 64).apply(frame, 0)
+    dirty = rg.Grade.compile(rg.PRESETS["dirty"], 64, 64).apply(frame, 0)
+
+    def sat(a):
+        a = a.astype(np.float32)
+        return float((a.max(2) - a.min(2)).mean())
+
+    if sat(opium) >= sat(dirty):
+        raise AssertionError(
+            f"opium should be the near-monochrome one: {sat(opium):.1f} against "
+            f"{sat(dirty):.1f}")
+
+
+# ------------------------------------------------------------ motion blur
+
+@test
+def a_shutter_blurs_the_move_it_is_given():
+    still = rt.StillSource(STILL)
+    move = rt.CameraMove.resolve(motion="pan-right", pan=0.8)
+    framing = rt.CropFraming(still.size, 200, 320, move, 0.0)
+
+    def edges(shot):
+        arr = shot.frame(0.5, 15).astype(np.float32)
+        return float(np.abs(np.diff(arr, axis=1)).mean())
+
+    sharp = edges(rt.Shot(still, framing, None, 1.0, fps=30))
+    blurred = edges(rt.Shot(still, framing, None, 1.0, fps=30, shutter=360.0,
+                            shutter_samples=5))
+    if blurred >= sharp:
+        raise AssertionError(
+            f"the shutter did not smear the move ({sharp:.2f} -> {blurred:.2f})")
+
+
+@test
+def a_shutter_on_a_shot_that_does_not_move_costs_nothing():
+    still = rt.StillSource(STILL)
+    framing = rt.CropFraming(still.size, 120, 200, rt.CameraMove.resolve(), 0.0)
+    shot = rt.Shot(still, framing, None, 1.0, fps=30, shutter=180.0)
+    plain = rt.Shot(still, framing, None, 1.0, fps=30)
+    if not np.array_equal(shot.frame(0.5, 15), plain.frame(0.5, 15)):
+        raise AssertionError("a static shot was blurred against nothing")
+
+
+@test
+def a_shutter_with_no_move_is_warned_about():
+    spec = spec_for([{"start": 0.2, "end": 1.0, "shutter": 180}])
+    if not any("no move" in w for w in spec.warnings):
+        raise AssertionError(f"no warning about a wasted shutter: {spec.warnings}")
+
+
+@test
+def shutter_values_outside_a_real_shutter_are_refused():
+    raises(lambda: spec_for([{"start": 0, "end": 1, "shutter": 540}]),
+           "0 to 360", "shutter beyond a full rotation")
+    raises(lambda: spec_for([{"start": 0, "end": 1, "shutter": 180,
+                              "shutter_samples": 1}]),
+           "at least 2", "one sub-frame is not an exposure")
+
+
+# ---------------------------------------------------------------- stutter
+
+@test
+def a_stutter_holds_the_picture_at_a_lower_frame_rate():
+    still = rt.StillSource(STILL)
+    move = rt.CameraMove.resolve(motion="zoom-in", zoom=[1.0, 1.6])
+    framing = rt.CropFraming(still.size, 120, 200, move, 0.0)
+    shot = rt.Shot(still, framing, None, 1.0, fps=30, stutter=8.0)
+
+    # 0.02s apart, inside one 1/8s step: identical.
+    if not np.array_equal(shot.frame(0.30, 9), shot.frame(0.32, 10)):
+        raise AssertionError("two samples inside one step differed")
+    # Across a step boundary: different.
+    if np.array_equal(shot.frame(0.30, 9), shot.frame(0.45, 13)):
+        raise AssertionError("the picture never advanced to the next step")
+
+    smooth = rt.Shot(still, framing, None, 1.0, fps=30)
+    if np.array_equal(smooth.frame(0.30, 9), smooth.frame(0.32, 10)):
+        raise AssertionError("the un-stuttered shot was not moving to begin with")
+
+
+@test
+def a_negative_stutter_is_refused():
+    raises(lambda: spec_for([{"start": 0, "end": 1, "stutter": -4}]),
+           "cannot be negative", "negative stutter")
+
+
+# ----------------------------------------------------------- punctuation
+
+@test
+def an_invert_transition_flips_the_picture_for_two_frames():
+    line = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "invert"], 0.0, 30)
+    eq([round(t, 3) for t, kind in line.marks], [1.0], "mark at the junction")
+
+    before = float(line.frame(0.9).mean())
+    during = float(line.frame(1.02).mean())
+    after = float(line.frame(1.2).mean())
+    close(during, 255.0 - 100.0, 2.0, "the second shot inverted")
+    if abs(after - 100.0) > 2.0:
+        raise AssertionError(f"the invert did not end: {after:.0f} at t=1.2")
+    close(before, 40.0, 2.0, "the first shot was untouched")
+
+
+@test
+def a_channel_invert_touches_only_its_own_channel():
+    shots = dummy_shots([1.0, 1.0])
+    line = rt.Timeline(shots, ["cut", "invert-r"], 0.0, 30)
+    frame = line.frame(1.02)
+    eq(int(frame[0, 0, 0]), 255 - 100, "red inverted")
+    eq(int(frame[0, 0, 1]), 100, "green untouched")
+    eq(int(frame[0, 0, 2]), 100, "blue untouched")
+
+
+@test
+def a_shake_moves_the_frame_and_lands():
+    still = rt.StillSource(STILL)
+    framing = rt.CropFraming(still.size, 120, 200, rt.CameraMove.resolve(), 0.0)
+
+    class Held:
+        duration = 1.0
+
+        def __init__(self):
+            self._shot = rt.Shot(still, framing, None, 1.0)
+
+        def frame(self, t, index):
+            return self._shot.frame(t, index)
+
+        def release(self):
+            pass
+
+    line = rt.Timeline([Held(), Held()], ["cut", "shake"], 0.0, 30)
+    settled = line.frame(0.5)
+    early = line.frame(1.01)
+    late = line.frame(1.0 + rt.MARK_SECONDS["shake"] + 0.05)
+
+    if np.array_equal(early, settled):
+        raise AssertionError("the shake did not move the frame")
+    if not np.array_equal(late, settled):
+        raise AssertionError("the shake never decayed back to a still frame")
+
+
+@test
+def a_shake_is_the_same_on_every_render():
+    line_a = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "shake"], 0.0, 30)
+    line_b = rt.Timeline(dummy_shots([1.0, 1.0]), ["cut", "shake"], 0.0, 30)
+    if not np.array_equal(line_a.frame(1.05), line_b.frame(1.05)):
+        raise AssertionError("two renders of the same shake differed")
+
+
+@test
+def punctuation_on_the_first_clip_is_refused():
+    for kind in ("flash", "invert", "invert-g", "shake"):
+        raises(lambda k=kind: br.ClipSpec.parse({"start": 0, "end": 1,
+                                                 "transition": k}, 0, 3.0, 100.0),
+               "nothing before it", f"{kind} on clip 0")
+
+
+@test
+def the_new_transitions_render_end_to_end():
+    out = os.path.join(WORK, "reel-effects.mp4")
+    spec = spec_for([
+        {"start": 0.2, "end": 0.45, "grade": "dirty", "motion": "zoom-in",
+         "zoom": 1.35, "shutter": 180},
+        {"start": 0.6, "end": 0.85, "transition": "invert", "motion": "pan-right",
+         "zoom": 1.2, "shutter": 360, "grade": "dirty"},
+        {"start": 1.8, "end": 2.05, "transition": "invert-b", "motion": "zoom-out",
+         "shutter": 180, "grade": "dirty"},
+        {"start": 2.9, "end": 3.6, "transition": "shake", "grade": "opium",
+         "stutter": 8},
+    ], output=out, crossfade=0.0)
+    result = br.render(spec)
+
+    eq(result["status"], "success", "render status")
+    eq([c["transition"] for c in result["clips"]],
+       ["crossfade", "invert", "invert-b", "shake"], "transitions echoed")
+    eq(result["clips"][0]["shutter"], 180.0, "shutter echoed")
+    eq(result["clips"][3]["stutter"], 8.0, "stutter echoed")
+    close(result["duration"], 1.45, 0.05, "reel length")
 
 
 # --------------------------------------------------------------------- main

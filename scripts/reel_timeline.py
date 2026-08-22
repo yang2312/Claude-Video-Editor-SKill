@@ -57,10 +57,29 @@ from reel_grade import Grade
 MOTIONS = ("none", "zoom-in", "zoom-out", "pan-left", "pan-right")
 
 # How a clip joins the one before it.
+#
 #   crossfade — dissolve; reads as "time passing"
 #   cut       — hard join; the only way to make a section feel fast
-#   flash     — hard join under a white bloom; reads as "somewhere else now"
-TRANSITIONS = ("crossfade", "cut", "flash")
+#   flash     — hard join under a white bloom; "somewhere else now"
+#   invert    — two frames of inverted colour. Harder than a white flash and
+#               far more specific: white reads as light, inversion reads as a
+#               fault in the picture, which is why short-form edits reach for
+#               it between three-frame cuts.
+#   invert-r  — the same, on one channel only, so the fault has a colour.
+#   invert-g    Alternating channels across a burst is what keeps a run of
+#   invert-b    them from turning into a strobe.
+#   shake     — a decaying positional jitter with a brightness pop, about a
+#               third of a second. It is what a "flashy shake" preset is: a
+#               transform and a brightness curve, nothing else.
+TRANSITIONS = ("crossfade", "cut", "flash", "invert", "invert-r", "invert-g",
+               "invert-b", "shake")
+
+# Punctuation that lands *after* a junction rather than across it, and how
+# long each one lasts. A flash is the exception — it blooms symmetrically
+# around the cut, so its width is derived from the crossfade instead.
+MARK_SECONDS = {"invert": 2 / 30.0, "invert-r": 2 / 30.0, "invert-g": 2 / 30.0,
+                "invert-b": 2 / 30.0, "shake": 9 / 30.0}
+_CHANNEL = {"invert-r": 0, "invert-g": 1, "invert-b": 2}
 
 # Rotated so adjacent shots never repeat a move — the thing that makes a
 # Ken Burns reel read as mechanical rather than filmed.
@@ -516,16 +535,23 @@ class Shot:
     """
 
     __slots__ = ("source", "framing", "grade", "duration", "label",
-                 "grade_name", "freezable", "frames_built", "_frozen")
+                 "grade_name", "freezable", "frames_built", "fps", "shutter",
+                 "shutter_samples", "stutter", "_frozen")
 
     def __init__(self, source, framing, grade: Optional[Grade],
-                 duration: float, label: str = "", grade_name: str = "none"):
+                 duration: float, label: str = "", grade_name: str = "none",
+                 fps: int = 30, shutter: float = 0.0, shutter_samples: int = 3,
+                 stutter: float = 0.0):
         self.source = source
         self.framing = framing
         self.grade = grade
         self.duration = duration
         self.label = label
         self.grade_name = grade_name
+        self.fps = fps
+        self.shutter = shutter
+        self.shutter_samples = max(2, shutter_samples)
+        self.stutter = stutter
 
         # A still photograph held without a camera move produces the same
         # pixels for its whole length. Resizing and blurring it eighty-four
@@ -540,14 +566,58 @@ class Shot:
     def frame(self, t: float, index: int) -> np.ndarray:
         arr = self._frozen
         if arr is None:
+            if self.stutter > 0:
+                # Hold each sample for a whole step, so the shot plays at a
+                # lower frame rate than the reel around it. Applied to the
+                # source time and the move together — a stutter that let the
+                # camera keep gliding would read as a dropped frame rather
+                # than as a choice.
+                step = 1.0 / self.stutter
+                t = min(self.duration, (t // step) * step)
             progress = 0.0 if self.duration <= 0 else t / self.duration
-            arr = self.framing.apply(self.source.frame(t), progress)
+            image = self.source.frame(t)
+            if self.shutter > 0 and not getattr(self.framing, "static", False):
+                arr = self._exposed(image, progress)
+            else:
+                arr = self.framing.apply(image, progress)
             self.frames_built += 1
             if self.freezable:
                 self._frozen = arr
         if self.grade is None:
             return arr
         return self.grade.apply(arr, index)
+
+    def _exposed(self, image, progress: float) -> np.ndarray:
+        """
+        Motion blur, by opening the shutter across the move.
+
+        A frame is not an instant — a real shutter is open for a fraction of
+        it, and everything that moves during that fraction is smeared. Without
+        it a fast push or slide reads as a slideshow of sharp frames, which is
+        the single most common tell of an unfinished edit.
+
+        The blur is applied to *this* module's move, not the camera's. The
+        footage already carries whatever the operator did; what has no blur is
+        the crop window we are sliding on top of it, so that is what gets
+        sampled. On a still there is nothing else to sample anyway.
+
+        180 degrees is the film convention: open for half of each frame.
+        360 is fully open, and reads as a smear.
+        """
+        exposure = (self.shutter / 360.0) / max(self.fps, 1)
+        span = exposure / self.duration if self.duration > 0 else 0.0
+        n = self.shutter_samples
+
+        total = None
+        for k in range(n):
+            offset = (k / (n - 1) - 0.5) * span
+            sample = self.framing.apply(image, progress + offset)
+            if total is None:
+                total = sample.astype(np.float32)
+            else:
+                total += sample
+        total /= n
+        return total.astype(np.uint8)
 
     def release(self) -> None:
         self._frozen = None
@@ -654,11 +724,13 @@ class Timeline:
 
         self.shots = shots
         self.placements = plan([s.duration for s in shots], transitions, crossfade)
-        # Clip 0 always cuts in, so a flash asked for there has nothing to
-        # flash between. `plan` drops it; this drops it from the bloom list
-        # for the same reason, and the spec layer is what warns about it.
-        self.flashes = [p.start for p, kind in zip(self.placements, transitions)
-                        if p.index > 0 and kind == "flash"]
+        # Clip 0 always cuts in, so punctuation asked for there has nothing to
+        # punctuate. `plan` drops it; this drops it for the same reason, and
+        # the spec layer is what refuses it up front.
+        self.marks = [(p.start, kind)
+                      for p, kind in zip(self.placements, transitions)
+                      if p.index > 0 and (kind in MARK_SECONDS or kind == "flash")]
+        self.flashes = [t for t, kind in self.marks if kind == "flash"]
 
         self.duration = self.placements[-1].end if self.placements else 0.0
         self._crossfade = crossfade
@@ -684,10 +756,7 @@ class Timeline:
                 1.0, max(0.0, (t - over.start) / self._crossfade))
             out = _blend(self._draw(under, t, index), out, weight)
 
-        amount = self._flash_amount(t)
-        if amount > 0:
-            out = _bloom(out, amount)
-        return out
+        return self._punctuate(out, t, index)
 
     def _draw(self, placement: Placement, t: float, index: int) -> np.ndarray:
         shot = self.shots[placement.index]
@@ -721,7 +790,29 @@ class Timeline:
             i += 1
         return active
 
+    def _punctuate(self, out: np.ndarray, t: float, index: int) -> np.ndarray:
+        """
+        Whatever marks a junction, applied only near the junction.
+
+        Every one of these touches a handful of frames out of hundreds, so
+        each is guarded by its own window rather than wrapping the timeline.
+        """
+        for moment, kind in self.marks:
+            since = t - moment
+            if kind == "flash":
+                distance = abs(since)
+                if distance < self._half:
+                    amount = (1.0 - distance / self._half) ** 1.6 * self._strength
+                    out = _bloom(out, amount)
+            elif 0.0 <= since < MARK_SECONDS.get(kind, 0.0):
+                if kind == "shake":
+                    out = _shake(out, since / MARK_SECONDS[kind], index)
+                else:
+                    out = _invert(out, _CHANNEL.get(kind))
+        return out
+
     def _flash_amount(self, t: float) -> float:
+        """The bloom strength at t. Kept as a seam for tests."""
         best = 0.0
         for moment in self.flashes:
             distance = abs(t - moment)
@@ -744,6 +835,52 @@ def _blend(under: np.ndarray, over: np.ndarray, weight: float) -> np.ndarray:
     out *= (1.0 - weight)
     out += over.astype(np.float32) * weight
     return out.astype(np.uint8)
+
+
+def _invert(frame: np.ndarray, channel: Optional[int]) -> np.ndarray:
+    """
+    Flip the picture to its opposite, whole or one channel at a time.
+
+    Two frames of this between short cuts is the cheapest energy in editing:
+    it costs one subtraction and reads as a hard fault rather than as light.
+    """
+    if channel is None:
+        return 255 - frame
+    out = frame.copy()
+    out[:, :, channel] = 255 - out[:, :, channel]
+    return out
+
+
+def _shake(frame: np.ndarray, progress: float, index: int,
+           strength: float = 0.028) -> np.ndarray:
+    """
+    A decaying positional jitter with a brightness pop.
+
+    The offset is derived from the frame's own number, so a re-render is
+    identical and two clips at different points of the reel do not shake in
+    step. Decay is what separates a shake from a vibration: it has to land.
+    """
+    decay = (1.0 - min(1.0, max(0.0, progress))) ** 1.6
+    if decay <= 0.001:
+        return frame
+
+    height, width = frame.shape[:2]
+    rng = np.random.default_rng(20260822 + index)
+    reach = strength * decay
+    dx = int(round(rng.normal(0.0, reach * width)))
+    dy = int(round(rng.normal(0.0, reach * height)))
+
+    out = np.roll(frame, dx, axis=1)
+    if dy:
+        out = np.roll(out, dy, axis=0)
+
+    # The brightness pop is what sells the impact; without it the frame just
+    # moves. Kept small — this runs on nine frames, not on a whole shot.
+    lift = 1.0 + 0.35 * decay
+    popped = out.astype(np.float32)
+    popped *= lift
+    np.clip(popped, 0.0, 255.0, out=popped)
+    return popped.astype(np.uint8)
 
 
 def _bloom(frame: np.ndarray, amount: float) -> np.ndarray:

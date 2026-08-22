@@ -67,6 +67,13 @@ class Look:
     contrast     1.0 untouched
     lift         raises the black point — the milky shadows of aged film
     gamma        <1 brightens midtones, >1 deepens them
+    black/white  input levels. Everything below `black` is crushed to zero and
+                 everything above `white` is blown out. Pulling them together
+                 is the "extract" look: high contrast, detail only where the
+                 light was. Free — it folds into the same table as gamma.
+    glow         0..1 bloom spilling out of the highlights
+    glow_threshold  where the bloom starts, 0..1 of full brightness
+    rgb_split    chromatic aberration, in pixels of red/blue separation
     vignette     0..1 strength of the corner falloff
     grain        0..1 amount of luminance noise
     softness     0..1 blend toward a blurred copy; old lenses were not sharp
@@ -77,6 +84,11 @@ class Look:
     contrast: float = 1.0
     lift: float = 0.0
     gamma: float = 1.0
+    black: float = 0.0
+    white: float = 1.0
+    glow: float = 0.0
+    glow_threshold: float = 0.62
+    rgb_split: float = 0.0
     vignette: float = 0.0
     grain: float = 0.0
     softness: float = 0.0
@@ -100,6 +112,19 @@ PRESETS: dict[str, Look] = {
                  vignette=0.18),
     "vivid": Look(saturation=1.24, temperature=0.04, contrast=1.14,
                   gamma=1.03, vignette=0.22),
+
+    # The two below come from the short-form edit vocabulary rather than from
+    # film stock. They are heavy on purpose: both are built to sit under
+    # three-frame cuts where a subtle grade would not register at all.
+
+    # Crushed to near-monochrome with the highlights blooming — the look that
+    # comes from stacking an extract, heavy noise and a glow.
+    "opium": Look(saturation=0.06, contrast=1.12, black=0.30, white=0.74,
+                  glow=0.55, glow_threshold=0.52, grain=0.10, vignette=0.42),
+
+    # Noisy, split and blown — the companion to a stuttered frame rate.
+    "dirty": Look(saturation=0.92, contrast=1.18, black=0.06, white=0.94,
+                  glow=0.28, rgb_split=2.5, grain=0.14, vignette=0.30),
 }
 
 
@@ -229,7 +254,7 @@ class Grade:
 
     __slots__ = ("look", "size", "_matrix_t", "_offset", "_channel_lut",
                  "_tone_lut", "_vignette", "_grain", "_grain_stride",
-                 "_pixels", "_needs_clip")
+                 "_pixels", "_needs_clip", "_glow", "_split")
 
     _cache: dict[tuple, "Grade"] = {}
 
@@ -239,7 +264,7 @@ class Grade:
         self._pixels = width * height
 
         matrix, offset = _linear_map(look)
-        tone = _tone_curve(look.gamma)
+        tone = _tone_curve(look.gamma, look.black, look.white)
 
         self._matrix_t = None
         self._offset = None
@@ -264,6 +289,8 @@ class Grade:
 
         self._vignette = _vignette_mask(look.vignette, width, height)
         self._grain, self._grain_stride = _grain_field(look.grain, width, height)
+        self._glow = (look.glow, look.glow_threshold) if look.glow > 0 else None
+        self._split = int(round(look.rgb_split)) if look.rgb_split >= 0.5 else 0
 
         # A final clip costs two passes over a 25 MB buffer, so only pay for
         # it when something can actually leave 0..255. Three ways to be safe:
@@ -277,7 +304,8 @@ class Grade:
         bounded = (self._tone_lut is not None
                    or self._channel_lut is not None
                    or self._matrix_t is None)
-        self._needs_clip = self._grain is not None or not bounded
+        self._needs_clip = (self._grain is not None or self._glow is not None
+                            or not bounded)
 
     # -- construction ----------------------------------------------------
 
@@ -346,7 +374,8 @@ class Grade:
         else:
             out = frame
 
-        if self._vignette is not None or self._grain is not None:
+        if (self._vignette is not None or self._grain is not None
+                or self._glow is not None or self._split):
             return self._texture(out, index)
 
         # No spatial stage, so nothing has copied the result out of the
@@ -377,24 +406,43 @@ class Grade:
             # bright frame instead.
             return dst.reshape(frame.shape)
 
-        # Gamma is a table, so the value has to be quantised to index it —
+        # The curve is a table, so the value has to be quantised to index it —
         # which costs the clip that a power of a negative number would need
         # anyway.
+        #
+        # The half is what makes that quantisation round to nearest rather
+        # than floor, and it matters more than it looks. Levels stretch the
+        # table across a narrower input band, so they multiply whatever error
+        # arrives at it: at `black` 0.30 and `white` 0.74 the band is 0.44
+        # wide and a floor's half-level error comes out the other side as
+        # more than two. One scalar add, and the error halves instead.
         np.clip(dst, 0.0, 255.0, out=dst)
+        dst += 0.5
         idx = _scratch("tone_idx", flat.shape, np.uint8)
         np.copyto(idx, dst, casting="unsafe")
         return self._tone_lut[idx].reshape(frame.shape)
 
     def _texture(self, arr: np.ndarray, index: int):
-        """Vignette and grain — the two stages that are genuinely per-pixel."""
+        """
+        The stages that are genuinely per-pixel, in the order light meets them.
+
+        Glow spills out of the highlights before the lens darkens the corners,
+        so a vignette dims the bloom the way it dims everything else. The
+        split is a lens artefact and lands after both. Grain is the film, so
+        it goes on last.
+        """
         if arr.dtype == np.float32:
             work = arr
         else:
             work = _scratch("tex", arr.shape, np.float32)
             np.copyto(work, arr)
 
+        if self._glow is not None:
+            work += _bloom_field(work, *self._glow)
         if self._vignette is not None:
             work *= self._vignette
+        if self._split:
+            _split_channels(work, self._split)
         if self._grain is not None:
             work += self._grain_phase(index)
 
@@ -482,12 +530,67 @@ def _linear_map(look: Look) -> tuple[np.ndarray, np.ndarray]:
     return matrix, offset
 
 
-def _tone_curve(gamma: float) -> Optional[np.ndarray]:
-    """A 256-entry gamma ramp, or None when gamma is a no-op."""
-    if abs(gamma - 1.0) < 1e-6:
+def _tone_curve(gamma: float, black: float = 0.0,
+                white: float = 1.0) -> Optional[np.ndarray]:
+    """
+    A 256-entry curve carrying input levels and gamma, or None for a no-op.
+
+    Levels ride along with gamma for free: both are pointwise and monotone, so
+    crushing the blacks costs nothing that gamma was not already costing. That
+    is why the "extract" look — greyscale plus hard levels — needs no new
+    per-frame stage at all; the greyscale half is a channel mix and folds into
+    the matrix instead.
+    """
+    if white <= black:
+        raise ValueError(
+            f"grade white ({white}) must be above black ({black})")
+    neutral = (abs(gamma - 1.0) < 1e-6 and abs(black) < 1e-6
+               and abs(white - 1.0) < 1e-6)
+    if neutral:
         return None
+
     ramp = np.arange(256, dtype=np.float32) / 255.0
+    ramp = np.clip((ramp - black) / (white - black), 0.0, 1.0)
     return (np.power(ramp, gamma) * 255.0).astype(np.float32)
+
+
+def _bloom_field(work: np.ndarray, amount: float, threshold: float) -> np.ndarray:
+    """
+    Light spilling out of the highlights.
+
+    Built at a quarter of the resolution and scaled back up. A bloom is a
+    low-frequency thing by definition — there is no detail in it to lose — so
+    blurring a sixteenth of the pixels gives the same picture for a
+    sixteenth of the work.
+
+    Returns what to add, rather than adding in place, so the caller keeps
+    control of the order the per-pixel stages run in.
+    """
+    from PIL import Image, ImageFilter
+
+    h, w = work.shape[:2]
+    cut = threshold * 255.0
+    small = work[::4, ::4]
+    over = np.clip((small - cut) / max(255.0 - cut, 1.0), 0.0, 1.0)
+    lit = np.clip(small * over, 0.0, 255.0).astype(np.uint8)
+
+    blurred = Image.fromarray(lit).filter(
+        ImageFilter.GaussianBlur(max(2.0, w / 220.0)))
+    spill = np.asarray(blurred.resize((w, h), Image.BILINEAR), dtype=np.float32)
+    spill *= amount
+    return spill
+
+
+def _split_channels(work: np.ndarray, pixels: int) -> None:
+    """
+    Chromatic aberration: red one way, blue the other, in place.
+
+    Two rolls of a single channel each. The green channel stays put, which is
+    what keeps the picture from looking merely blurred — the eye reads the
+    fringing as an optical fault rather than as softness.
+    """
+    work[:, :, 0] = np.roll(work[:, :, 0], -pixels, axis=1)
+    work[:, :, 2] = np.roll(work[:, :, 2], pixels, axis=1)
 
 
 _MASKS: dict[tuple, np.ndarray] = {}

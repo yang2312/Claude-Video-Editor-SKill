@@ -1,0 +1,113 @@
+{
+  "_comment": "Short-form burst, built from the vocabulary in the Premiere tutorial: 5-frame clips, a zoom punch on every one, motion blur under each punch, inverted-colour punctuation with the channel alternating, a shake before the landing, then one long clip at 0.8x to pay it off. Every range comes from a clean stretch in scan.json.",
+  "source": "source.mp4",
+  "output": "burst.mp4",
+  "guard": "scan.json",
+  "size": "1080x1920",
+  "fps": 30,
+  "crossfade": 0,
+  "crf": 25,
+  "preset": "medium",
+  "clips": [
+    {
+      "start": 139.0,
+      "end": 139.2,
+      "motion": "zoom-in",
+      "zoom": [
+        1.02,
+        1.34
+      ],
+      "shutter": 180,
+      "grade": "dirty",
+      "label": "punch 1 - opens tight and pushes"
+    },
+    {
+      "start": 109.4,
+      "end": 109.6,
+      "transition": "invert",
+      "motion": "zoom-out",
+      "zoom": [
+        1.3,
+        1.02
+      ],
+      "shutter": 180,
+      "grade": "dirty",
+      "label": "punch 2 - pulls the other way, inverted join"
+    },
+    {
+      "start": 81.6,
+      "end": 81.78,
+      "transition": "cut",
+      "motion": "pan-right",
+      "zoom": 1.22,
+      "pan": 0.5,
+      "shutter": 240,
+      "grade": "dirty",
+      "label": "punch 3 - a slide, held tight so it has room to travel"
+    },
+    {
+      "start": 152.0,
+      "end": 152.18,
+      "transition": "invert-r",
+      "motion": "zoom-in",
+      "zoom": [
+        1.06,
+        1.38
+      ],
+      "shutter": 240,
+      "grade": "dirty",
+      "label": "punch 4 - red fault on the join"
+    },
+    {
+      "start": 130.2,
+      "end": 130.36,
+      "transition": "cut",
+      "motion": "pan-left",
+      "zoom": 1.26,
+      "pan": 0.5,
+      "shutter": 300,
+      "grade": "dirty",
+      "label": "punch 5 - shortest yet, hardest blur"
+    },
+    {
+      "start": 175.2,
+      "end": 175.36,
+      "transition": "invert-b",
+      "motion": "zoom-out",
+      "zoom": [
+        1.4,
+        1.04
+      ],
+      "shutter": 300,
+      "grade": "dirty",
+      "label": "punch 6 - blue fault, the last of the burst"
+    },
+    {
+      "start": 56.0,
+      "end": 56.5,
+      "transition": "shake",
+      "motion": "zoom-in",
+      "zoom": [
+        1.0,
+        1.1
+      ],
+      "shutter": 180,
+      "stutter": 12,
+      "grade": "opium",
+      "label": "the impact - stuttered to 12fps and crushed, under a shake"
+    },
+    {
+      "start": 143.0,
+      "end": 145.4,
+      "transition": "cut",
+      "speed": 0.8,
+      "motion": "zoom-out",
+      "zoom": [
+        1.16,
+        1.0
+      ],
+      "grade": "vivid",
+      "label": "the landing - slowed to 0.8x, graded back to colour, no blur"
+    }
+  ]
+}
