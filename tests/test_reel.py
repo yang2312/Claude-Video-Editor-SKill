@@ -1746,6 +1746,14 @@ def a_freeze_holds_the_last_frame_without_moving_the_picture():
         raise AssertionError(
             f"the source was asked for t={max(calls)}, past the end of the clip")
 
+    # The picture is identical by construction, so it is read once. This is
+    # not a micro-optimisation: a reader asked for a timestamp it has already
+    # passed seeks for it, and on a 108 MB source that measured 17.6 seconds
+    # per frozen frame. A two-second freeze turned a four-minute render into
+    # twenty-two before this was cached.
+    reads_at_the_end = sum(1 for c in calls if abs(c - 1.0) < 1e-9)
+    eq(reads_at_the_end, 1, "reads of the held frame")
+
 
 @test
 def a_freeze_lengthens_the_clip_on_the_timeline():

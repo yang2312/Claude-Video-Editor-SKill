@@ -594,7 +594,7 @@ class Shot:
 
     __slots__ = ("source", "framing", "grade", "duration", "moving", "label",
                  "grade_name", "freezable", "frames_built", "fps", "shutter",
-                 "shutter_samples", "stutter", "spill", "_frozen")
+                 "shutter_samples", "stutter", "spill", "_frozen", "_held")
 
     def __init__(self, source, framing, grade: Optional[Grade],
                  duration: float, label: str = "", grade_name: str = "none",
@@ -628,9 +628,19 @@ class Shot:
                           and getattr(framing, "static", False))
         self.frames_built = 0
         self._frozen = None
+        # The freeze gets its own slot rather than reusing `_frozen`, which
+        # means "this shot never changes". A frozen tail is the opposite: the
+        # shot changes right up until it stops, so caching its last picture
+        # under the same name would hand that picture back for the moving
+        # part too if anything ever asked for a frame out of order.
+        self._held = None
 
     def frame(self, t: float, index: int) -> np.ndarray:
+        held = self.duration > self.moving and t >= self.moving
+
         arr = self._frozen
+        if arr is None and held:
+            arr = self._held
         if arr is None:
             if self.stutter > 0:
                 # Hold each sample for a whole step, so the shot plays at a
@@ -650,6 +660,14 @@ class Shot:
             self.frames_built += 1
             if self.freezable:
                 self._frozen = arr
+            elif held:
+                # Sixty frames of a held picture used to be sixty requests
+                # for the same timestamp, and a reader asked for a timestamp
+                # it has already passed seeks for it. On a 108 MB source that
+                # measured 17.6 seconds *per frozen frame* — a two-second
+                # freeze turned a four-minute render into twenty-two. The
+                # picture is identical by construction; read it once.
+                self._held = arr
         if self.grade is None:
             return arr
         return self.grade.apply(arr, index)
@@ -688,6 +706,7 @@ class Shot:
 
     def release(self) -> None:
         self._frozen = None
+        self._held = None
         self.source.release()
 
 
