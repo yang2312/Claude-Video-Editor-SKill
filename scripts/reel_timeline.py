@@ -592,18 +592,25 @@ class Shot:
     than by reaching into a private attribute for it.
     """
 
-    __slots__ = ("source", "framing", "grade", "duration", "label",
+    __slots__ = ("source", "framing", "grade", "duration", "moving", "label",
                  "grade_name", "freezable", "frames_built", "fps", "shutter",
                  "shutter_samples", "stutter", "spill", "_frozen")
 
     def __init__(self, source, framing, grade: Optional[Grade],
                  duration: float, label: str = "", grade_name: str = "none",
                  fps: int = 30, shutter: float = 0.0, shutter_samples: int = 3,
-                 stutter: float = 0.0, spill: tuple = DEFAULT_SPILL):
+                 stutter: float = 0.0, spill: tuple = DEFAULT_SPILL,
+                 freeze: float = 0.0):
         self.source = source
         self.framing = framing
         self.grade = grade
-        self.duration = duration
+        # `moving` is how long there is anything to look at; `duration` is
+        # how long the shot is on screen. A freeze is the gap between them —
+        # the picture stops, the reel does not. Everything that reads the
+        # clock for a picture reads `moving`, and everything that reads it
+        # for placement reads `duration`, which is why they are two names.
+        self.moving = duration
+        self.duration = duration + max(0.0, freeze)
         self.label = label
         self.grade_name = grade_name
         self.fps = fps
@@ -632,8 +639,9 @@ class Shot:
                 # camera keep gliding would read as a dropped frame rather
                 # than as a choice.
                 step = 1.0 / self.stutter
-                t = min(self.duration, (t // step) * step)
-            progress = 0.0 if self.duration <= 0 else t / self.duration
+                t = min(self.moving, (t // step) * step)
+            t = min(t, self.moving)
+            progress = 0.0 if self.moving <= 0 else t / self.moving
             image = self.source.frame(t)
             if self.shutter > 0 and not getattr(self.framing, "static", False):
                 arr = self._exposed(image, progress)
@@ -664,7 +672,7 @@ class Shot:
         360 is fully open, and reads as a smear.
         """
         exposure = (self.shutter / 360.0) / max(self.fps, 1)
-        span = exposure / self.duration if self.duration > 0 else 0.0
+        span = exposure / self.moving if self.moving > 0 else 0.0
         n = self.shutter_samples
 
         total = None

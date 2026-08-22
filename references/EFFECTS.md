@@ -40,6 +40,7 @@ key.
 | `shutter` | clip key | `0`–`360` | motion blur under this renderer's move |
 | `shutter_samples` | clip key | `2`+ | how smooth that blur is |
 | `stutter` | clip key | `8`, `12` | holds the shot at a lower frame rate |
+| `freeze` | clip key | seconds | holds the last frame after the shot ends |
 | `hold` | reel key | seconds | how long a still photograph stays up |
 | `saturation` | grade knob | `0.0`–`1.5` | colour intensity |
 | `temperature` | grade knob | `-1`–`1` | cool blue to warm amber |
@@ -315,6 +316,26 @@ Holds each sample for a whole step, so the shot plays at 8 or 12 frames a
 second while the reel around it stays at 30. Applied to the source time and
 the move together — a stutter that let the camera keep gliding would read as a
 dropped frame rather than as a choice.
+
+### `freeze`
+
+*freeze frame, hold, end card, đóng băng khung, giữ khung cuối*
+
+```json
+{"start": 73.15, "end": 75.0, "freeze": 2.0}
+```
+
+Holds the last frame for this many extra seconds. The clock keeps running,
+the picture stops where it stopped — no footage is invented and the move
+lands rather than being cut off mid-travel.
+
+It exists for the closing card. A title with a name and a date needs about
+three seconds to be read, and the shot you want to end on is rarely that
+long; a freeze buys the reading time out of the one frame you already chose.
+
+Punctuation on the clip still plays inside its own window, so an
+`out-of-bounds` border draws and releases while the picture is live and the
+freeze begins after it.
 
 ### `hold`
 

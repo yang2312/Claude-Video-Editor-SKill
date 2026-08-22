@@ -1444,7 +1444,7 @@ def _every_effect_name():
     names = set(rt.MOTIONS) | set(rt.TRANSITIONS)
     names |= {f.name for f in dataclasses.fields(rg.Look)}
     names |= {"speed", "shutter", "shutter_samples", "stutter",
-              "zoom", "pan", "anchor", "ease", "fit", "spill"}
+              "zoom", "pan", "anchor", "ease", "fit", "spill", "freeze"}
     return names
 
 
@@ -1707,6 +1707,62 @@ def a_spill_with_no_area_is_refused():
                {"start": 0, "end": 1, "transition": "out-of-bounds",
                 "spill": [0.5, 1.4, 0.3, 0.8]}, 2, 3.0, 100.0),
            "between 0 and 1", "a spill past the frame")
+
+
+
+@test
+def a_freeze_holds_the_last_frame_without_moving_the_picture():
+    """
+    A closing card needs about three seconds to be read and the shot under
+    it is rarely that long. The freeze buys them without inventing footage:
+    the clock keeps running, the picture stops where it stopped.
+    """
+    calls = []
+
+    class Counting:
+        size = (64, 36)
+
+        def frame(self, t):
+            calls.append(round(t, 3))
+            return rt.Image.new("RGB", self.size, (int(20 + t * 40), 0, 0))
+
+        def release(self):
+            pass
+
+    move = rt.CameraMove.resolve("zoom-in", 1.4)
+    framing = rt.CropFraming((64, 36), 64, 36, move, 0.0)
+    shot = rt.Shot(Counting(), framing, None, 1.0, freeze=2.0)
+
+    eq(round(shot.duration, 3), 3.0, "on screen for a second plus the freeze")
+    eq(round(shot.moving, 3), 1.0, "but only a second of it moves")
+
+    last = shot.frame(1.0, 30)
+    for t in (1.5, 2.0, 2.9):
+        held = shot.frame(t, 30)
+        if not np.array_equal(held, last):
+            raise AssertionError(f"the picture moved at t={t} inside the freeze")
+
+    if max(calls) > 1.0 + 1e-9:
+        raise AssertionError(
+            f"the source was asked for t={max(calls)}, past the end of the clip")
+
+
+@test
+def a_freeze_lengthens_the_clip_on_the_timeline():
+    spec = spec_for([{"start": 0.0, "end": 1.0},
+                     {"start": 1.0, "end": 2.0, "freeze": 2.0}])
+    close(spec.clips[1].length, 3.0, 1e-9, "a second of picture plus two held")
+    placements = rt.plan([c.length for c in spec.clips],
+                         [c.transition for c in spec.clips], spec.crossfade)
+    close(placements[-1].end, 4.0 - spec.crossfade, 1e-9,
+          "the reel is longer by the freeze")
+
+
+@test
+def a_negative_freeze_is_refused():
+    raises(lambda: br.ClipSpec.parse({"start": 0, "end": 1, "freeze": -1.0},
+                                     1, 3.0, 100.0),
+           "cannot be negative", "a freeze that runs backwards")
 
 
 

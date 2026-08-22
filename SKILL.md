@@ -120,6 +120,7 @@ comes from the source); `size` yields exactly what it says.
 | `shutter` | 0 | motion blur, in degrees of shutter angle |
 | `shutter_samples` | 3 | sub-frames the exposure is built from |
 | `stutter` | 0 | hold the shot at this many frames a second |
+| `freeze` | 0 | hold the last frame this many extra seconds |
 | `fit` | false | letterbox instead of cropping |
 | `grade` | — | a preset name, or an object of overrides |
 | `ease` | `"smooth"` | `smooth`, or `impact` for a snap |

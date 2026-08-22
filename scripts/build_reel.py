@@ -57,6 +57,9 @@ Per clip:
     spill           under an out-of-bounds transition, which block of picture
                     breaks the border: [top, bottom, left, right] as
                     fractions. Put it over something real.
+    freeze          hold the last frame for this many extra seconds. A
+                    closing card needs about three seconds to be read, and
+                    the shot under it is rarely that long.
     fit             letterbox the whole frame on a blurred bed instead of
                     cropping — for shots whose meaning spans the full width
     grade           a preset name, or an object of overrides
@@ -211,7 +214,7 @@ def reject_unknown(entry: dict, allowed, where: str) -> None:
 CLIP_KEYS = frozenset({
     "start", "end", "duration", "image", "anchor", "speed", "motion", "zoom",
     "pan", "ease", "fit", "grade", "transition", "label", "shutter",
-    "shutter_samples", "stutter", "spill",
+    "shutter_samples", "stutter", "spill", "freeze",
 })
 
 REEL_KEYS = frozenset({
@@ -234,6 +237,7 @@ class ClipSpec:
     shutter_samples: int = 3
     stutter: float = 0.0
     spill: tuple = DEFAULT_SPILL
+    freeze: float = 0.0
     fit: bool = False
     look: Look = field(default_factory=Look)
     grade_name: str = "none"
@@ -242,10 +246,10 @@ class ClipSpec:
 
     @property
     def length(self) -> float:
-        """How long this clip runs on the timeline, after speed."""
+        """How long this clip runs on the timeline, after speed and freeze."""
         if self.image:
-            return self.end          # a still has no time axis to speed up
-        return (self.end - self.start) / self.speed
+            return self.end + self.freeze   # a still has no time axis to speed
+        return (self.end - self.start) / self.speed + self.freeze
 
     @classmethod
     def parse(cls, entry: dict, index: int, default_hold: float,
@@ -331,12 +335,16 @@ class ClipSpec:
 
         spill = cls._resolve_spill(entry.get("spill"), transition, where)
 
+        freeze = float(entry.get("freeze", 0.0))
+        if freeze < 0:
+            raise ValueError(f"{where} freeze cannot be negative, got {freeze}")
+
         look, grade_name = resolve_look(entry.get("grade"))
 
         return cls(start=start, end=end, image=image, speed=speed, move=move,
                    shutter=shutter, shutter_samples=shutter_samples,
-                   stutter=stutter, spill=spill, fit=fit, look=look,
-                   grade_name=grade_name, transition=transition,
+                   stutter=stutter, spill=spill, freeze=freeze, fit=fit,
+                   look=look, grade_name=grade_name, transition=transition,
                    label=entry.get("label", ""))
 
     @staticmethod
@@ -587,7 +595,8 @@ def build_shots(spec: ReelSpec) -> list:
                           duration, clip.label, clip.grade_name, fps=spec.fps,
                           shutter=clip.shutter,
                           shutter_samples=clip.shutter_samples,
-                          stutter=clip.stutter, spill=clip.spill))
+                          stutter=clip.stutter, spill=clip.spill,
+                          freeze=clip.freeze))
     return shots
 
 
@@ -726,6 +735,7 @@ def render(spec: ReelSpec, progress: bool = False) -> dict:
                 "speed": c.speed,
                 "shutter": c.shutter,
                 "stutter": c.stutter,
+                "freeze": c.freeze,
                 "fit": c.fit,
                 "label": c.label,
             }
@@ -790,6 +800,7 @@ EFFECT_NOTES = {
     "anchor": "where the crop sits when nothing is moving",
     "ease": "how a move spends its time: smooth, or impact for a snap",
     "spill": "which block breaks an out-of-bounds border: [t, b, l, r]",
+    "freeze": "hold the last frame this many extra seconds",
     "fit": "letterbox instead of cropping",
 
     "saturation": "1.0 untouched, 0.0 greyscale, above 1 richer",
@@ -831,7 +842,7 @@ def describe_effects() -> str:
         rows("Transitions   (clip key: transition)", list(TRANSITIONS),
              "  set on the incoming clip; clip 0 can only cut"),
         rows("Time          (clip keys)",
-             ["speed", "shutter", "shutter_samples", "stutter"]),
+             ["speed", "shutter", "shutter_samples", "stutter", "freeze"]),
         rows("Framing       (clip keys)",
              ["zoom", "pan", "anchor", "ease", "fit", "spill"]),
         rows("Grade knobs   (clip key: grade)", knobs,
